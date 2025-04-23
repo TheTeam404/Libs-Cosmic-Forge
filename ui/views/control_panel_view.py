@@ -1,66 +1,59 @@
-# --- START OF REFACTORED FILE libs_cosmic_forge/ui/views/control_panel_view.py ---
+# --- START OF MODIFIED FILE libs_cosmic_forge/ui/views/control_panel_view.py ---
 """
-Control Panel View for Peak Fitting settings and actions using CollapsibleBox.
-(Formerly PeakFittingControlPanel in peak_fitting_controls_view.py)
-
-Provides controls for global fitting parameters, triggers fitting for all peaks,
-displays detailed fit results (multiple profiles) for a selected peak,
-highlights the best fit, allows adjusting the ROI for the selected peak,
-and triggers refitting for only the selected peak.
+Control Panel View for Spectrum Processing settings (Baseline, Denoising, Smoothing).
+Uses CollapsibleBox widgets for organization.
 """
 import logging
-import numpy as np
-import pandas as pd
+import numpy as np # Keep if needed for other parts, not directly used here
+import pandas as pd # Keep if needed for other parts, not directly used here
 from typing import List, Optional, Dict, Any
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QFormLayout, QSpinBox,
-                             QDoubleSpinBox, QPushButton, QLabel, QHBoxLayout,
-                             QComboBox, QCheckBox, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QAbstractItemView, QMessageBox, QSizePolicy)
+                             QDoubleSpinBox, QPushButton, QLabel, QHBoxLayout, QComboBox,
+                             QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
+                             QAbstractItemView, QMessageBox, QSizePolicy)
 from PyQt6.QtCore import pyqtSignal, Qt, QVariant, pyqtSlot
-from PyQt6.QtGui import QFont, QColor, QBrush , QAction
+from PyQt6.QtGui import QFont, QColor, QBrush , QAction, QIcon # Added QIcon
 
 # Attempt to import necessary components, provide clear errors if missing
 try:
     from ui.widgets.info_button import InfoButton
     from ui.widgets.collapsible_box import CollapsibleBox
-    from core.data_models import Peak, FitResult # Ensure FitResult is imported
+    # No core data models needed directly in this panel anymore
 except ImportError as e:
-    logging.critical(f"Failed to import UI or Core components: {e}. Check project structure and dependencies.")
-    # Optionally, re-raise or exit if these are absolutely critical
-    raise
+    logging.critical(f"Failed to import UI components: {e}. Check project structure and dependencies.")
+    raise # Re-raise as these are critical for the UI panel
 
-# Renamed class to match the import statement causing the error
+# Renamed class from previous context (fitting) to general processing
 class ProcessingControlPanel(QWidget):
-    """Control panel for peak fitting using collapsible sections."""
+    """Control panel for spectrum processing: Baseline, Denoising, Smoothing."""
+    # Signal emitted to trigger processing with current settings
     process_triggered = pyqtSignal(dict)
-    # Signal emitted to fit all detected peaks with current global settings
-    fit_peaks_triggered = pyqtSignal(dict)
-    # Signal emitted to refit a single peak
-    # Sends: peak_list_index (int), settings (dict, potentially with specific ROI)
-    refit_single_peak_requested = pyqtSignal(int, dict)
-    # Signal emitted when a user selects a specific fit profile row in the details table
-    # Sends: fit_result (FitResult object)
-    show_specific_fit = pyqtSignal(FitResult) # Use specific type hint
 
     def __init__(self, config: dict, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        # Use .get() for safer access to potentially missing keys
-        self.config = config.get('peak_fitting', {})
-        self.current_peak_data: Optional[Peak] = None
-        self._current_peak_list_index: Optional[int] = None # Store index for refitting
-        # Provide a default for model_selection if not in config
-        self.current_model_selection: str = self.config.get('model_selection', 'AIC')
-        self._dark_mode: bool = False # Track theme for background colors
+        # Get the main processing section, or an empty dict if it doesn't exist
+        self.processing_config = config.get('processing', {})
+        self.config = self.processing_config # Keep self.config for compatibility if needed
+        self._dark_mode: bool = False # Track theme if needed for styling
+
+        # --- List of available wavelets (can be expanded) ---
+        # Common wavelets suitable for signal processing
+        self._available_wavelets = [
+            'db2', 'db4', 'db6', 'db8', 'db10', # Daubechies
+            'sym2', 'sym4', 'sym6', 'sym8', 'sym10', # Symlets
+            'coif1', 'coif2', 'coif3', 'coif4', 'coif5', # Coiflets
+            'bior1.3', 'bior3.7', 'bior6.8', # Biorthogonal
+            'rbio3.7' # Reverse Biorthogonal
+        ]
 
         try:
             self._init_ui()
             self._load_defaults()
-            self.results_box.setVisible(False) # Initially hide results until a peak is selected
+            self._update_parameter_visibility(initial_setup=True) # Set initial visibility
         except Exception as e:
             logging.error(f"Error during ProcessingControlPanel initialization: {e}", exc_info=True)
-            # Depending on severity, you might want to disable the widget or show an error message
-            # self.setEnabled(False) # Example: Disable the widget on error
+            self.setEnabled(False) # Disable the widget on init error
 
     def _init_ui(self):
         """Initializes the UI components and layout."""
@@ -68,530 +61,299 @@ class ProcessingControlPanel(QWidget):
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(8)
 
-        # --- Global Fitting Parameters ---
-        self.fit_params_box = CollapsibleBox("Global Fitting Parameters", self)
-        fit_params_content = QWidget()
-        fit_params_layout = QFormLayout(fit_params_content)
-        fit_params_layout.setContentsMargins(8, 8, 8, 8)
-        fit_params_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        fit_params_layout.setHorizontalSpacing(10)
-        fit_params_layout.setVerticalSpacing(8)
+        # --- Baseline Correction Parameters ---
+        self.baseline_box = CollapsibleBox("1. Baseline Correction", self, is_expanded=True)
+        baseline_content = QWidget()
+        baseline_layout = QFormLayout(baseline_content)
+        baseline_layout.setContentsMargins(8, 8, 8, 8)
+        baseline_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        baseline_layout.setHorizontalSpacing(10)
+        baseline_layout.setVerticalSpacing(8)
 
-        # ROI Factor
-        self.roi_factor_dspin = QDoubleSpinBox()
-        self.roi_factor_dspin.setRange(2.0, 20.0); self.roi_factor_dspin.setDecimals(1)
-        self.roi_factor_dspin.setSingleStep(0.5); self.roi_factor_dspin.setToolTip("Default fitting Region of Interest (ROI) width = Factor × Estimated FWHM.")
-        fit_params_layout.addRow("Default ROI Factor:", self.roi_factor_dspin)
+        # Baseline Method Combo
+        self.baseline_method_combo = QComboBox()
+        self.baseline_method_combo.addItems(["Polynomial", "SNIP", "None"])
+        self.baseline_method_combo.setToolTip("Select the baseline correction algorithm.")
+        self.baseline_method_combo.currentTextChanged.connect(self._update_parameter_visibility)
+        baseline_layout.addRow("Method:", self.baseline_method_combo)
 
-        # Min ROI Width
-        self.min_roi_width_dspin = QDoubleSpinBox()
-        self.min_roi_width_dspin.setRange(0.01, 5.0); self.min_roi_width_dspin.setDecimals(2)
-        self.min_roi_width_dspin.setSingleStep(0.05); self.min_roi_width_dspin.setSuffix(" nm")
-        self.min_roi_width_dspin.setToolTip("Minimum width for the default fitting ROI.")
-        fit_params_layout.addRow("Default Min ROI Width:", self.min_roi_width_dspin)
+        # Polynomial Order (visible only if Polynomial selected)
+        self.baseline_poly_order_spin = QSpinBox()
+        self.baseline_poly_order_spin.setRange(0, 10)
+        self.baseline_poly_order_spin.setToolTip("Order of the polynomial for baseline fitting.")
+        self.poly_order_row_widget = QWidget() # Container for row items
+        poly_order_row_layout = QHBoxLayout(self.poly_order_row_widget)
+        poly_order_row_layout.setContentsMargins(0,0,0,0)
+        poly_order_row_layout.addWidget(self.baseline_poly_order_spin)
+        poly_order_row_layout.addWidget(InfoButton(lambda: QMessageBox.information(self, "Polynomial Order", "Sets the degree of the polynomial function used to fit the baseline points (selected by percentile). Low orders (1-3) are common.")))
+        self.poly_order_form_row = baseline_layout.addRow("Polynomial Order:", self.poly_order_row_widget)
 
-        # Model Selection (AIC/BIC)
-        ms_hbox = QHBoxLayout()
-        self.model_select_combo = QComboBox()
-        self.model_select_combo.addItems(["AIC", "BIC"]) # Akaike / Bayesian Information Criterion
-        self.model_select_combo.setToolTip("Criterion used to automatically select the 'best' fit profile among alternatives.")
-        self.model_select_combo.currentTextChanged.connect(self._update_model_selection_criterion)
-        ms_hbox.addWidget(self.model_select_combo)
-        # Ensure InfoButton import worked
-        if 'InfoButton' in globals():
-             ms_hbox.addWidget(InfoButton(self._show_model_select_info, "Model Selection Help", self))
-        else:
-             logging.warning("InfoButton class not available.")
-        fit_params_layout.addRow("Best Fit Criterion:", ms_hbox)
+        # SNIP Iterations (visible only if SNIP selected)
+        self.baseline_snip_iter_spin = QSpinBox()
+        self.baseline_snip_iter_spin.setRange(1, 500)
+        self.baseline_snip_iter_spin.setToolTip("Number of iterations (clipping window sizes) for the SNIP algorithm.")
+        self.snip_iter_row_widget = QWidget() # Container for row items
+        snip_iter_row_layout = QHBoxLayout(self.snip_iter_row_widget)
+        snip_iter_row_layout.setContentsMargins(0,0,0,0)
+        snip_iter_row_layout.addWidget(self.baseline_snip_iter_spin)
+        snip_iter_row_layout.addWidget(InfoButton(lambda: QMessageBox.information(self, "SNIP Iterations", "Controls the smoothness of the SNIP baseline. Higher iterations remove broader features.")))
+        self.snip_iter_form_row = baseline_layout.addRow("SNIP Iterations:", self.snip_iter_row_widget)
 
-        # Max Iterations
-        self.max_iter_spin = QSpinBox()
-        self.max_iter_spin.setRange(100, 10000); self.max_iter_spin.setSingleStep(100)
-        self.max_iter_spin.setToolTip("Maximum number of iterations allowed for the fitting algorithm.")
-        fit_params_layout.addRow("Max Iterations:", self.max_iter_spin)
+        self.baseline_box.setContentLayout(baseline_layout)
+        main_layout.addWidget(self.baseline_box)
 
-        self.fit_params_box.setContentLayout(fit_params_layout)
-        main_layout.addWidget(self.fit_params_box)
+        # --- Denoising Parameters --- ## NEW SECTION ##
+        self.denoising_box = CollapsibleBox("2. Denoising", self, is_expanded=True)
+        denoising_content = QWidget()
+        denoising_layout = QFormLayout(denoising_content)
+        denoising_layout.setContentsMargins(8, 8, 8, 8)
+        denoising_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        denoising_layout.setHorizontalSpacing(10)
+        denoising_layout.setVerticalSpacing(8)
 
-        # --- Fit All Button ---
-        self.fit_button = QPushButton("Fit All Detected Peaks")
-        self.fit_button.setToolTip("Apply fitting using the above global parameters to all currently detected peaks.")
-        self.fit_button.clicked.connect(self._emit_fit_all_signal)
-        main_layout.addWidget(self.fit_button)
+        # Denoising Method Combo
+        self.denoising_method_combo = QComboBox()
+        self.denoising_method_combo.addItems(["Wavelet", "None"])
+        self.denoising_method_combo.setToolTip("Select the denoising algorithm to apply after baseline correction.")
+        self.denoising_method_combo.currentTextChanged.connect(self._update_parameter_visibility)
+        denoising_layout.addRow("Method:", self.denoising_method_combo)
 
-        # --- Selected Peak Details & Refit Box ---
-        self.results_box = CollapsibleBox("Selected Peak Details & Refit", self)
-        results_content = QWidget()
-        results_layout = QVBoxLayout(results_content)
-        results_layout.setContentsMargins(8, 8, 8, 8)
-        results_layout.setSpacing(8)
+        # -- Wavelet Parameters (Container) --
+        self.wavelet_params_widget = QWidget() # Container for wavelet params
+        wavelet_params_layout = QFormLayout(self.wavelet_params_widget)
+        wavelet_params_layout.setContentsMargins(0, 0, 0, 0) # No extra margins needed inside
+        wavelet_params_layout.setSpacing(8)
 
-        # Label for selected peak info
-        self.selected_peak_label = QLabel("Select a peak from the list or plot to view details.")
-        self.selected_peak_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.selected_peak_label.setStyleSheet("font-style: italic; padding: 5px;")
-        results_layout.addWidget(self.selected_peak_label)
+        self.wavelet_type_combo = QComboBox()
+        self.wavelet_type_combo.addItems(self._available_wavelets)
+        self.wavelet_type_combo.setToolTip("Type of wavelet basis function (e.g., Daubechies 'db', Symlets 'sym').")
+        wavelet_params_layout.addRow("Wavelet Type:", self.wavelet_type_combo)
 
-        # Table for fit results of the selected peak
-        self.fit_details_table = QTableWidget()
-        # Define columns clearly
-        self.fit_details_columns = ["Profile", "Amplitude", "Center", "Width", "FWHM/Mix", "R²", "Score"]
-        self.fit_details_table.setColumnCount(len(self.fit_details_columns))
-        self.fit_details_table.setHorizontalHeaderLabels(self.fit_details_columns)
-        self.fit_details_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers) # Read-only
-        self.fit_details_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows) # Select whole row
-        self.fit_details_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection) # Only one row selectable
-        self.fit_details_table.verticalHeader().setVisible(False) # Hide row numbers
-        self.fit_details_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents) # Auto-resize cols initially
-        self.fit_details_table.horizontalHeader().setStretchLastSection(True) # Allow last col (Score) to stretch
-        self.fit_details_table.setMinimumHeight(110) # Adjust height
-        self.fit_details_table.setMaximumHeight(120)
-        self.fit_details_table.itemSelectionChanged.connect(self._handle_fit_profile_selection) # Signal for row selection
-        results_layout.addWidget(self.fit_details_table)
+        self.wavelet_level_spin = QSpinBox()
+        self.wavelet_level_spin.setRange(1, 10) # Max level depends on data length, set dynamically?
+        self.wavelet_level_spin.setToolTip("Decomposition level. Higher levels affect broader features. Auto-adjusts if needed.")
+        wavelet_params_layout.addRow("Level:", self.wavelet_level_spin)
 
-        # GroupBox for ROI adjustment and Refit button
-        self.roi_adjust_group = QGroupBox("Adjust ROI & Refit Selected Peak")
-        self.roi_adjust_group.setToolTip("Manually define the wavelength range (ROI) used for fitting only this specific peak.")
-        roi_layout = QFormLayout(self.roi_adjust_group)
-        roi_layout.setSpacing(6)
-        roi_layout.setContentsMargins(8, 10, 8, 8)
+        self.wavelet_mode_combo = QComboBox()
+        self.wavelet_mode_combo.addItems(["soft", "hard"])
+        self.wavelet_mode_combo.setToolTip("Thresholding mode ('soft' shrinks coeffs, 'hard' sets to zero).")
+        wavelet_params_layout.addRow("Mode:", self.wavelet_mode_combo)
 
-        self.roi_min_wl_dspin = QDoubleSpinBox()
-        self.roi_min_wl_dspin.setDecimals(4); self.roi_min_wl_dspin.setRange(0, 3000) # Wider range
-        self.roi_min_wl_dspin.setSuffix(" nm"); self.roi_min_wl_dspin.setToolTip("Manually set the start wavelength for the fitting ROI.")
-        self.roi_min_wl_dspin.setKeyboardTracking(False) # Emit valueChanged only when focus lost or Enter pressed
-        self.roi_min_wl_dspin.setEnabled(False) # Disabled until ROI data is loaded
+        self.wavelet_threshold_factor_dspin = QDoubleSpinBox()
+        self.wavelet_threshold_factor_dspin.setRange(0.1, 10.0)
+        self.wavelet_threshold_factor_dspin.setDecimals(2)
+        self.wavelet_threshold_factor_dspin.setSingleStep(0.1)
+        self.wavelet_threshold_factor_dspin.setToolTip("Threshold = Factor × Estimated Noise (MAD). Higher values remove more signal.")
+        wavelet_params_layout.addRow("Threshold Factor:", self.wavelet_threshold_factor_dspin)
 
-        self.roi_max_wl_dspin = QDoubleSpinBox()
-        self.roi_max_wl_dspin.setDecimals(4); self.roi_max_wl_dspin.setRange(0, 3000) # Wider range
-        self.roi_max_wl_dspin.setSuffix(" nm"); self.roi_max_wl_dspin.setToolTip("Manually set the end wavelength for the fitting ROI.")
-        self.roi_max_wl_dspin.setKeyboardTracking(False)
-        self.roi_max_wl_dspin.setEnabled(False) # Disabled until ROI data is loaded
+        # Add wavelet container widget to the main denoising layout
+        denoising_layout.addRow(self.wavelet_params_widget)
+        self.denoising_box.setContentLayout(denoising_layout)
+        main_layout.addWidget(self.denoising_box)
+        # -- End Denoising Section --
 
-        self.refit_button = QPushButton("Refit Selected Peak")
-        self.refit_button.setToolTip("Refit only this peak using the ROI defined above (or default if invalid).")
-        self.refit_button.clicked.connect(self._emit_refit_signal)
-        self.refit_button.setEnabled(False) # Disabled until ROI data is loaded
+        # --- Smoothing Parameters ---
+        self.smoothing_box = CollapsibleBox("3. Smoothing", self, is_expanded=True)
+        smoothing_content = QWidget()
+        smoothing_layout = QFormLayout(smoothing_content)
+        smoothing_layout.setContentsMargins(8, 8, 8, 8)
+        smoothing_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        smoothing_layout.setHorizontalSpacing(10)
+        smoothing_layout.setVerticalSpacing(8)
 
-        roi_layout.addRow("ROI Min:", self.roi_min_wl_dspin)
-        roi_layout.addRow("ROI Max:", self.roi_max_wl_dspin)
-        roi_layout.addRow(self.refit_button)
-        results_layout.addWidget(self.roi_adjust_group)
+        # Smoothing Method Combo
+        self.smoothing_method_combo = QComboBox()
+        self.smoothing_method_combo.addItems(["SavitzkyGolay", "None"])
+        self.smoothing_method_combo.setToolTip("Select the smoothing algorithm to apply after denoising.")
+        self.smoothing_method_combo.currentTextChanged.connect(self._update_parameter_visibility)
+        smoothing_layout.addRow("Method:", self.smoothing_method_combo)
 
-        self.results_box.setContentLayout(results_layout)
-        main_layout.addWidget(self.results_box)
+        # Savitzky-Golay Parameters (Container)
+        self.savitzky_params_widget = QWidget() # Container
+        savitzky_params_layout = QFormLayout(self.savitzky_params_widget)
+        savitzky_params_layout.setContentsMargins(0, 0, 0, 0)
+        savitzky_params_layout.setSpacing(8)
+
+        self.sg_window_spin = QSpinBox()
+        self.sg_window_spin.setRange(3, 101); self.sg_window_spin.setSingleStep(2) # Ensure odd steps
+        self.sg_window_spin.setToolTip("Window length for Savitzky-Golay filter (odd number > polyorder).")
+        savitzky_params_layout.addRow("Window Length:", self.sg_window_spin)
+
+        self.sg_polyorder_spin = QSpinBox()
+        self.sg_polyorder_spin.setRange(1, 10) # Order must be less than window
+        self.sg_polyorder_spin.setToolTip("Polynomial order for Savitzky-Golay filter (< window length).")
+        savitzky_params_layout.addRow("Polyorder:", self.sg_polyorder_spin)
+
+        # Add SG container to main smoothing layout
+        smoothing_layout.addRow(self.savitzky_params_widget)
+        self.smoothing_box.setContentLayout(smoothing_layout)
+        main_layout.addWidget(self.smoothing_box)
+
+        # --- Apply Button ---
+        self.process_button = QPushButton("Apply Processing Steps")
+        self.process_button.setIcon(QIcon.fromTheme("system-run", QIcon.fromTheme("process-working"))) # Example icon
+        self.process_button.setToolTip("Apply the selected baseline, denoising, and smoothing steps.")
+        self.process_button.clicked.connect(self._emit_process_signal)
+        main_layout.addWidget(self.process_button)
 
         main_layout.addStretch() # Push content to the top
         self.setLayout(main_layout)
 
     def _load_defaults(self):
         """Loads default values from config into UI widgets."""
+        logging.debug("Loading processing panel defaults.")
         try:
-            logging.debug("Loading peak fitting default parameters.")
-            self.roi_factor_dspin.setValue(self.config.get('roi_factor', 7.0))
-            self.min_roi_width_dspin.setValue(self.config.get('min_roi_width_nm', 0.1))
-            # Ensure current_model_selection was set in __init__
-            self.model_select_combo.setCurrentText(self.current_model_selection)
-            self.max_iter_spin.setValue(self.config.get('max_iterations', 2000))
-            self._update_score_column_header() # Set initial header
+            # Baseline Defaults
+            baseline_config = self.processing_config.get('baseline', {})
+            self.baseline_method_combo.setCurrentText(baseline_config.get('default_method', 'Polynomial'))
+            self.baseline_poly_order_spin.setValue(baseline_config.get('poly_order', 3))
+            self.baseline_snip_iter_spin.setValue(baseline_config.get('snip_iterations', 100))
+
+            # Denoising Defaults ## NEW SECTION ##
+            denoising_config = self.processing_config.get('denoising', {})
+            self.denoising_method_combo.setCurrentText(denoising_config.get('default_method', 'Wavelet'))
+            wavelet_config = denoising_config.get('wavelet', {})
+            default_wavelet_type = wavelet_config.get('wavelet_type', 'db8')
+            if default_wavelet_type in self._available_wavelets:
+                 self.wavelet_type_combo.setCurrentText(default_wavelet_type)
+            else:
+                 logging.warning(f"Default wavelet type '{default_wavelet_type}' from config not in available list. Using first available.")
+                 if self._available_wavelets:
+                      self.wavelet_type_combo.setCurrentIndex(0)
+            self.wavelet_level_spin.setValue(wavelet_config.get('level', 4))
+            self.wavelet_mode_combo.setCurrentText(wavelet_config.get('mode', 'soft'))
+            self.wavelet_threshold_factor_dspin.setValue(wavelet_config.get('threshold_sigma_factor', 3.0))
+
+            # Smoothing Defaults
+            smoothing_config = self.processing_config.get('smoothing', {})
+            self.smoothing_method_combo.setCurrentText(smoothing_config.get('default_method', 'SavitzkyGolay'))
+            sg_config = smoothing_config.get('savitzky_golay', {})
+            self.sg_window_spin.setValue(sg_config.get('window_length', 11))
+            self.sg_polyorder_spin.setValue(sg_config.get('polyorder', 3))
+
+            # Set initial visibility based on defaults
+            self._update_parameter_visibility(initial_setup=True)
+
         except Exception as e:
-            logging.error(f"Error loading default fitting parameters: {e}", exc_info=True)
+            logging.error(f"Error loading processing panel defaults: {e}", exc_info=True)
 
-    @pyqtSlot(str)
-    def _update_model_selection_criterion(self, criterion: str):
-        """Updates the internal state when the model selection combo changes."""
-        self.current_model_selection = criterion
-        logging.debug(f"Model selection criterion changed to: {criterion}")
-        self._update_score_column_header()
-        # Re-display details to update scores and potentially highlighting if a peak is selected
-        if self.current_peak_data:
-             self.display_peak_fit_details(self.current_peak_data, self._current_peak_list_index)
 
-    def _update_score_column_header(self):
-        """Updates the header of the 'Score' column in the details table."""
-        try:
-            # Find column index by name
-            score_col_idx = self.fit_details_columns.index("Score")
-            header_item = QTableWidgetItem(f"{self.current_model_selection}")
-            header_item.setToolTip(f"{self.current_model_selection} Score (lower is better)")
-            self.fit_details_table.setHorizontalHeaderItem(score_col_idx, header_item)
-        except ValueError:
-            logging.error("Could not find 'Score' column in fit_details_columns to update header.")
-        except Exception as e:
-             logging.error(f"Error updating score column header: {e}", exc_info=True)
-
-    def get_fitting_settings(self) -> dict:
-        """Collects current global fitting settings from the UI."""
-        try:
-            settings = {
-                # Profiles to attempt fitting with. Could be made configurable via UI/config later.
-                'profiles_to_fit': ['Gaussian', 'Lorentzian', 'PseudoVoigt'],
-                'roi_factor': self.roi_factor_dspin.value(),
-                'min_roi_width_nm': self.min_roi_width_dspin.value(),
-                'model_selection': self.model_select_combo.currentText(),
-                'max_fit_iterations': self.max_iter_spin.value(),
-            }
-            logging.debug(f"Gathered fitting settings: {settings}")
-            return settings
-        except Exception as e:
-            logging.error(f"Error gathering fitting settings: {e}", exc_info=True)
-            return {} # Return empty dict on error to prevent downstream issues
-
-    @pyqtSlot()
-    def _emit_fit_all_signal(self):
-        """Emits the signal to fit all peaks."""
-        settings = self.get_fitting_settings()
-        if settings: # Only emit if settings were gathered successfully
-            logging.info("Fit All Peaks button clicked. Emitting signal.")
-            self.fit_peaks_triggered.emit(settings)
+    def _update_parameter_visibility(self, text: Optional[str] = None, initial_setup: bool = False):
+        """Shows/hides parameter widgets based on selected method. If initial_setup is True, uses current combo texts."""
+        # Determine current methods
+        if initial_setup:
+            baseline_method = self.baseline_method_combo.currentText()
+            denoising_method = self.denoising_method_combo.currentText()
+            smoothing_method = self.smoothing_method_combo.currentText()
         else:
-            logging.error("Could not gather fitting settings. Fit All Peaks signal not emitted.")
-            QMessageBox.warning(self, "Error", "Could not retrieve fitting settings. Please check logs.")
+            # Get current text from all combos as any *might* have changed
+            baseline_method = self.baseline_method_combo.currentText()
+            denoising_method = self.denoising_method_combo.currentText()
+            smoothing_method = self.smoothing_method_combo.currentText()
+
+        # Baseline visibility
+        show_poly = baseline_method == "Polynomial"
+        show_snip = baseline_method == "SNIP"
+        # Use setRowVisible directly if parent is QFormLayout
+        self.baseline_box.layout().setRowVisible(self.poly_order_form_row, show_poly)
+        self.baseline_box.layout().setRowVisible(self.snip_iter_form_row, show_snip)
+
+        # Denoising visibility ## NEW SECTION ##
+        show_wavelet = denoising_method == "Wavelet"
+        self.wavelet_params_widget.setVisible(show_wavelet)
+
+        # Smoothing visibility
+        show_sg = smoothing_method == "SavitzkyGolay"
+        self.savitzky_params_widget.setVisible(show_sg)
+
+        # Adjust layout sizes if needed (might help with collapsible boxes)
+        # self.adjustSize() # Can sometimes cause issues, use with caution
+
+
+    def get_settings(self) -> dict:
+        """Collects current processing settings from the UI widgets."""
+        settings = {}
+        try:
+            # Baseline
+            baseline_method = self.baseline_method_combo.currentText()
+            settings['baseline_method'] = baseline_method
+            if baseline_method == "Polynomial":
+                settings['poly_order'] = self.baseline_poly_order_spin.value()
+                # Include percentile if it's a configurable parameter (assuming it might be added later)
+                # settings['percentile'] = self.baseline_poly_percentile_dspin.value()
+            elif baseline_method == "SNIP":
+                settings['num_iterations'] = self.baseline_snip_iter_spin.value()
+                # Include increasing_window if added as a control
+                # settings['increasing_window'] = self.baseline_snip_inc_window_check.isChecked()
+
+            # Denoising ## NEW SECTION ##
+            denoising_method = self.denoising_method_combo.currentText()
+            settings['denoising_method'] = denoising_method
+            if denoising_method == "Wavelet":
+                settings['wavelet_type'] = self.wavelet_type_combo.currentText()
+                settings['level'] = self.wavelet_level_spin.value()
+                settings['mode'] = self.wavelet_mode_combo.currentText()
+                settings['threshold_sigma_factor'] = self.wavelet_threshold_factor_dspin.value()
+
+            # Smoothing
+            smoothing_method = self.smoothing_method_combo.currentText()
+            settings['smoothing_method'] = smoothing_method
+            if smoothing_method == "SavitzkyGolay":
+                settings['window_length'] = self.sg_window_spin.value()
+                settings['polyorder'] = self.sg_polyorder_spin.value()
+                # Basic validation check
+                if settings['window_length'] <= settings['polyorder']:
+                     logging.warning(f"Savitzky-Golay window length ({settings['window_length']}) should be greater than polyorder ({settings['polyorder']}).")
+                     # Decide how to handle: Raise error, use defaults, skip step?
+                     # For now, just log the warning. Processing function should handle/adjust.
+                if settings['window_length'] % 2 == 0:
+                     logging.warning(f"Savitzky-Golay window length ({settings['window_length']}) should be odd.")
+                     # Processing function should handle/adjust.
+
+            logging.debug(f"Gathered processing settings: {settings}")
+            return settings
+
+        except Exception as e:
+            logging.error(f"Error gathering processing settings: {e}", exc_info=True)
+            QMessageBox.critical(self, "Settings Error", f"Could not retrieve processing settings:\n{e}")
+            return {} # Return empty dict on error
 
     @pyqtSlot()
-    def _emit_refit_signal(self):
-        """Emits the signal to refit the currently selected peak."""
-        if self.current_peak_data is None or self._current_peak_list_index is None:
-            logging.warning("Refit button clicked, but no peak is selected or index is missing.")
-            QMessageBox.warning(self, "No Peak Selected", "Please select a peak before attempting to refit.")
-            return
+    def _emit_process_signal(self):
+        """Validates settings and emits the process_triggered signal."""
+        settings = self.get_settings()
+        if settings: # Only emit if settings were gathered successfully
+            logging.info("Apply Processing button clicked. Emitting signal.")
+            # Perform quick validation specific to SavGol here if needed
+            if settings.get('smoothing_method') == 'SavitzkyGolay':
+                 wl = settings.get('window_length', 0)
+                 po = settings.get('polyorder', 0)
+                 if wl % 2 == 0:
+                      reply = QMessageBox.warning(self, "SG Window Even",
+                                                  f"Savitzky-Golay Window Length ({wl}) should be odd.\n"
+                                                  "The processing function will attempt to adjust it.\n\nProceed anyway?",
+                                                  QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                                  QMessageBox.StandardButton.Yes)
+                      if reply == QMessageBox.StandardButton.No: return
+                 if wl <= po:
+                      QMessageBox.critical(self, "SG Settings Invalid",
+                                           f"Savitzky-Golay Window Length ({wl}) must be greater than Polynomial Order ({po}).\n"
+                                           "Please correct the settings.")
+                      return # Stop emission if settings are invalid
 
-        settings = self.get_fitting_settings()
-        if not settings:
-            logging.error("Could not gather fitting settings. Refit signal not emitted.")
-            QMessageBox.warning(self, "Error", "Could not retrieve fitting settings. Please check logs.")
-            return
-
-        try:
-            roi_min = self.roi_min_wl_dspin.value()
-            roi_max = self.roi_max_wl_dspin.value()
-
-            # Check if manual ROI is valid
-            if roi_min < roi_max:
-                settings['roi_wavelengths'] = [roi_min, roi_max]
-                # Remove default ROI params if providing explicit wavelengths
-                settings.pop('roi_factor', None)
-                settings.pop('min_roi_width_nm', None)
-                logging.info(f"Requesting refit for Peak List Index {self._current_peak_list_index} "
-                             f"(Peak Index: {self.current_peak_data.index}) "
-                             f"with manual ROI [{roi_min:.4f}, {roi_max:.4f}] nm.")
-            else:
-                # Only warn if the user *could* have set an invalid ROI
-                if self.roi_min_wl_dspin.isEnabled():
-                    logging.warning(f"Manual ROI [{roi_min:.4f}, {roi_max:.4f}] is invalid (Min >= Max). "
-                                    "Refitting Peak List Index {self._current_peak_list_index} using default ROI definition.")
-                    QMessageBox.warning(self, "Invalid ROI", f"ROI Minimum ({roi_min:.4f}) must be less than ROI Maximum ({roi_max:.4f}).\nRefitting with default ROI.")
-                else:
-                    logging.info(f"Manual ROI controls disabled. Refitting Peak List Index {self._current_peak_list_index} using default ROI definition.")
-                # Ensure explicit ROI is not passed if invalid or not set
-                settings.pop('roi_wavelengths', None)
-
-            # Emit signal with stored list index and potentially modified settings
-            self.refit_single_peak_requested.emit(self._current_peak_list_index, settings)
-
-        except Exception as e:
-            logging.error(f"Error preparing or emitting refit signal: {e}", exc_info=True)
-            QMessageBox.critical(self, "Refit Error", f"An error occurred during refit preparation: {e}")
-
-
-    def _create_table_item(self, text: str, is_best_fit: bool = False,
-                           is_profile_name: bool = False, # Keep this flag if needed for special alignment
-                           alignment: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                           tooltip: Optional[str] = None,
-                           user_data: Any = None) -> QTableWidgetItem:
-        """Helper function to create and format a QTableWidgetItem."""
-        item = QTableWidgetItem(text)
-        item.setTextAlignment(alignment if not is_profile_name else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter) # Align profile left
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable) # Make read-only
-
-        # Apply visual styling for the best fit row
-        if is_best_fit:
-            font = item.font()
-            font.setBold(True)
-            item.setFont(font)
-            # Determine background color based on detected theme
-            best_bg_color = QColor("#3a5f4a") if self._dark_mode else QColor("#d0e0d0") # Darker Green / Lighter Green
-            item.setBackground(QBrush(best_bg_color))
-        # else: # Explicitly setting default background might be needed if styles conflict
-        #    default_bg_color = self.palette().base().color()
-        #    item.setBackground(QBrush(default_bg_color))
-
-        if tooltip:
-            item.setToolTip(tooltip)
-
-        # Store associated data (like the FitResult object) with the item
-        if user_data is not None:
-            # Store the data directly, QVariant usually not needed in PyQt6 unless for specific models/views
-            item.setData(Qt.ItemDataRole.UserRole, user_data)
-
-        return item
-
-    # Use @pyqtSlot decorator for methods connected to signals if desired (optional but good practice)
-    @pyqtSlot(object, int)
-    def display_peak_fit_details(self, peak: Optional[Peak], peak_list_index: Optional[int] = None):
-        """
-        Displays the fitting results for the selected peak in the table.
-
-        Args:
-            peak: The Peak object containing fit results, or None to clear.
-            peak_list_index: The index of this peak in the main peak list (for refitting).
-        """
-        self.current_peak_data = peak
-        self._current_peak_list_index = peak_list_index # Store index for refit signal
-
-        # --- Update Theme Information ---
-        try:
-            # Check parent window's theme manager if available (adjust path if needed)
-            parent_window = self.window() # Try to get the top-level window
-            if hasattr(parent_window, 'theme_manager') and hasattr(parent_window.theme_manager, 'current_theme_name'):
-                 self._dark_mode = 'dark' in parent_window.theme_manager.current_theme_name.lower()
-            else:
-                 self._dark_mode = False # Assume light theme if not found
-        except Exception as e:
-             logging.warning(f"Could not determine theme from parent: {e}")
-             self._dark_mode = False # Default to light on error
-
-
-        # --- Clear Table and Handle No Peak Case ---
-        try:
-            self.fit_details_table.setSortingEnabled(False) # Disable sorting during population
-            self.fit_details_table.clearSelection()
-            self.fit_details_table.setRowCount(0)
-        except Exception as e:
-            logging.error(f"Error clearing fit details table: {e}", exc_info=True)
-            # Might be critical, potentially disable parts of the UI
-
-        has_peak_data = peak is not None
-        self.results_box.setVisible(has_peak_data)
-        self.roi_adjust_group.setEnabled(False) # Disable ROI group initially
-        self.roi_min_wl_dspin.setEnabled(False)
-        self.roi_max_wl_dspin.setEnabled(False)
-        self.refit_button.setEnabled(False)
-        self.roi_adjust_group.setTitle("Adjust ROI & Refit Selected Peak") # Reset title
-
-
-        if not has_peak_data:
-            self.selected_peak_label.setText("Select a peak to view details.")
-            return # Exit early if no peak data
-
-        # --- Update Label and Prepare Fit Data ---
-        try:
-            peak_id_str = f"List Idx: {peak_list_index}" if peak_list_index is not None else f"Spectrum Idx: {peak.index}"
-            self.selected_peak_label.setText(f"Fit Details: Peak @ {peak.wavelength_fitted_or_detected:.4f} nm ({peak_id_str})")
-
-            # Combine best fit and alternative fits into one dictionary for iteration
-            all_fits: Dict[str, FitResult] = {}
-            if peak.alternative_fits:
-                 # Ensure alternative_fits is a dict {profile_name: FitResult}
-                 if isinstance(peak.alternative_fits, dict):
-                     all_fits.update(peak.alternative_fits)
-                 else:
-                      logging.warning(f"Peak {peak.index} alternative_fits is not a dict: {type(peak.alternative_fits)}")
-            if peak.best_fit:
-                 # Ensure best_fit is included, potentially overwriting if it was also in alternatives
-                 if isinstance(peak.best_fit, FitResult) and peak.best_fit.profile_type:
-                     all_fits[peak.best_fit.profile_type] = peak.best_fit
-                 else:
-                      logging.warning(f"Peak {peak.index} best_fit is invalid or missing profile_type.")
-
-
-            if not all_fits:
-                self.selected_peak_label.setText(f"No successful fits found for Peak @ {peak.wavelength_fitted_or_detected:.4f} nm ({peak_id_str})")
-                # Keep ROI group disabled as set above
-                return # Exit if no fits to display
-
-            # --- Handle ROI Display and Enablement ---
-            actual_roi = None
-            fit_with_roi = peak.best_fit or next(iter(all_fits.values()), None) # Prefer best fit for ROI info
-
-            if fit_with_roi and hasattr(fit_with_roi, 'roi_wavelengths'):
-                roi_data = getattr(fit_with_roi, 'roi_wavelengths')
-                if isinstance(roi_data, (list, tuple)) and len(roi_data) == 2 and all(isinstance(x, (int, float)) for x in roi_data):
-                    actual_roi = roi_data
-                    logging.debug(f"Found ROI [{actual_roi[0]:.4f}, {actual_roi[1]:.4f}] from fit result ({fit_with_roi.profile_type}).")
-
-            if actual_roi:
-                 # Ensure min < max before setting values
-                 if actual_roi[0] < actual_roi[1]:
-                     self.roi_min_wl_dspin.setValue(actual_roi[0])
-                     self.roi_max_wl_dspin.setValue(actual_roi[1])
-                     self.roi_adjust_group.setEnabled(True)
-                     self.roi_min_wl_dspin.setEnabled(True)
-                     self.roi_max_wl_dspin.setEnabled(True)
-                     self.refit_button.setEnabled(True)
-                     self.roi_adjust_group.setTitle("Adjust ROI & Refit Selected Peak")
-                 else:
-                     logging.warning(f"ROI info [{actual_roi[0]:.4f}, {actual_roi[1]:.4f}] from fit result is invalid (Min >= Max). Disabling manual adjustment.")
-                     self.roi_min_wl_dspin.setValue(peak.wavelength_fitted_or_detected) # Placeholder
-                     self.roi_max_wl_dspin.setValue(peak.wavelength_fitted_or_detected)
-                     self.roi_adjust_group.setEnabled(False)
-                     self.roi_adjust_group.setTitle("Adjust ROI & Refit (Invalid ROI from Fit)")
-
-            else:
-                 # If ROI info isn't available from fit results, disable manual adjustment
-                 logging.warning(f"ROI info not found in FitResult(s) for peak {peak.index}. Disabling manual ROI adjustment.")
-                 self.roi_min_wl_dspin.setValue(peak.wavelength_fitted_or_detected) # Set to center as placeholder
-                 self.roi_max_wl_dspin.setValue(peak.wavelength_fitted_or_detected)
-                 # Keep ROI group disabled as set above
-                 self.roi_adjust_group.setTitle("Adjust ROI & Refit (ROI Info Unavailable)")
-
-
-            # --- Populate Table Rows ---
-            col_map = {name: i for i, name in enumerate(self.fit_details_columns)}
-            score_label = self.current_model_selection # AIC or BIC
-            row = 0
-            best_fit_row = -1 # Track row index of the best fit
-
-            # Iterate through expected profiles to maintain order if desired, or just through available fits
-            profile_order = ['Gaussian', 'Lorentzian', 'PseudoVoigt']
-            displayed_profiles = set()
-
-            for profile_name in profile_order:
-                fit_result = all_fits.get(profile_name)
-                if fit_result is None or not isinstance(fit_result, FitResult):
-                    continue # Skip if this profile wasn't successfully fitted or data is invalid
-
-                displayed_profiles.add(profile_name)
-                self.fit_details_table.insertRow(row)
-                is_best = (peak.best_fit is not None and peak.best_fit.profile_type == profile_name)
-                if is_best:
-                    best_fit_row = row
-
-                # Helper for safe formatting
-                def format_val(val, prec=4): return f"{val:.{prec}f}" if val is not None and np.isfinite(val) else "N/A"
-                def format_err(err, prec=1): return f"{err:.{prec}e}" if err is not None and np.isfinite(err) and abs(err) > 1e-12 else "" # Avoid tiny noise
-
-
-                # Get parameters and errors safely
-                amp = getattr(fit_result, 'amplitude', None)
-                amp_err = fit_result.param_errors[0] if hasattr(fit_result, 'param_errors') and fit_result.param_errors and len(fit_result.param_errors) > 0 else None
-                cen = getattr(fit_result, 'center', None)
-                cen_err = fit_result.param_errors[1] if hasattr(fit_result, 'param_errors') and fit_result.param_errors and len(fit_result.param_errors) > 1 else None
-                wid = getattr(fit_result, 'width', None)
-                wid_err = fit_result.param_errors[2] if hasattr(fit_result, 'param_errors') and fit_result.param_errors and len(fit_result.param_errors) > 2 else None
-                eta = getattr(fit_result, 'mixing_param_eta', None)
-                # TODO: Add error for eta if available (param_errors[3]?)
-
-                # Profile Name (with best fit marker *)
-                profile_text = f"{profile_name}{' *' if is_best else ''}"
-                item_prof = self._create_table_item(profile_text, is_best, True, user_data=fit_result) # Pass FitResult here
-                self.fit_details_table.setItem(row, col_map["Profile"], item_prof)
-
-                # Amplitude
-                amp_tooltip = f"± {format_err(amp_err)}" if amp_err is not None else ""
-                item_amp = self._create_table_item(format_val(amp, 2), is_best, tooltip=amp_tooltip)
-                self.fit_details_table.setItem(row, col_map["Amplitude"], item_amp)
-
-                # Center
-                cen_tooltip = f"± {format_err(cen_err)}" if cen_err is not None else ""
-                item_cen = self._create_table_item(format_val(cen, 4), is_best, tooltip=cen_tooltip)
-                self.fit_details_table.setItem(row, col_map["Center"], item_cen)
-
-                # Width (Sigma/Gamma)
-                wid_tooltip = f"± {format_err(wid_err)}" if wid_err is not None else ""
-                item_wid = self._create_table_item(format_val(wid, 4), is_best, tooltip=wid_tooltip)
-                self.fit_details_table.setItem(row, col_map["Width"], item_wid)
-
-                # FWHM / Mixing Param (Eta)
-                fwhm_mix_val = "N/A"
-                fwhm_mix_tip = ""
-                if profile_name == 'PseudoVoigt' and eta is not None and np.isfinite(eta):
-                    fwhm_mix_val = f"η={format_val(eta, 3)}"
-                    fwhm_mix_tip = "Mixing Param (η)"
-                elif hasattr(fit_result, 'fwhm') and fit_result.fwhm is not None and np.isfinite(fit_result.fwhm):
-                     fwhm_mix_val = format_val(fit_result.fwhm, 4)
-                     fwhm_mix_tip = "FWHM (nm)"
-                item_fm = self._create_table_item(fwhm_mix_val, is_best, alignment=Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter, tooltip=fwhm_mix_tip)
-                self.fit_details_table.setItem(row, col_map["FWHM/Mix"], item_fm)
-
-                # R²
-                r2 = getattr(fit_result, 'r_squared', None)
-                item_r2 = self._create_table_item(format_val(r2, 3), is_best, alignment=Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter, tooltip="R² Fit Metric")
-                self.fit_details_table.setItem(row, col_map["R²"], item_r2)
-
-                # Score (AIC or BIC)
-                score_attr = 'aic' if score_label == 'AIC' else 'bic'
-                score_val = getattr(fit_result, score_attr, None)
-                item_score = self._create_table_item(format_val(score_val, 2), is_best, alignment=Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter, tooltip=f"{score_label} Score")
-                self.fit_details_table.setItem(row, col_map["Score"], item_score)
-
-                row += 1
-
-            # Add any fits that were present but not in the standard order (shouldn't happen with current logic)
-            for profile_name, fit_result in all_fits.items():
-                 if profile_name not in displayed_profiles and isinstance(fit_result, FitResult):
-                      logging.warning(f"Displaying non-standard profile '{profile_name}' found in fit results.")
-                      # ... (add code similar to above to display this row) ...
-                      row += 1
-
-
-            self.fit_details_table.resizeColumnsToContents()
-            self.fit_details_table.setSortingEnabled(True)
-
-            # Automatically select the best fit row after populating
-            if best_fit_row != -1:
-                self.fit_details_table.selectRow(best_fit_row)
-            elif self.fit_details_table.rowCount() > 0:
-                 # Select the first row if no specific best fit was marked (or found)
-                 self.fit_details_table.selectRow(0)
-
-        except Exception as e:
-            logging.error(f"Error displaying peak fit details for peak {peak.index if peak else 'None'}: {e}", exc_info=True)
-            self.selected_peak_label.setText(f"Error displaying details for peak {peak.index if peak else 'None'}")
-            # Clear table on error to avoid inconsistent state
-            self.fit_details_table.setRowCount(0)
-            self.roi_adjust_group.setEnabled(False)
-
-
-    @pyqtSlot()
-    def _handle_fit_profile_selection(self):
-        """Emits signal when a row (fit profile) is selected in the details table."""
-        selected_items = self.fit_details_table.selectedItems()
-        if not selected_items:
-            # logging.debug("Fit profile selection cleared.") # Optional: Log deselection
-            return # No selection or selection cleared
-
-        try:
-            # Get the item from the first column (Profile) of the selected row
-            selected_row = selected_items[0].row()
-            profile_item = self.fit_details_table.item(selected_row, 0) # Column 0 is "Profile"
-
-            if profile_item:
-                # Retrieve the FitResult object stored in UserRole
-                # Use .data() which handles QVariant implicitly in PyQt6
-                fit_data = profile_item.data(Qt.ItemDataRole.UserRole)
-
-                if isinstance(fit_data, FitResult):
-                    logging.debug(f"User selected fit profile: {fit_data.profile_type} for peak index {self.current_peak_data.index if self.current_peak_data else 'N/A'}")
-                    self.show_specific_fit.emit(fit_data) # Emit the selected FitResult
-                elif fit_data is None:
-                    logging.warning("Selected profile item has no UserRole data (FitResult).")
-                else:
-                    logging.warning(f"UserRole data in profile selection is not a FitResult object, type is {type(fit_data)}.")
-            else:
-                logging.warning("Could not get profile item for selected row.")
-        except Exception as e:
-            logging.error(f"Error handling fit profile selection: {e}", exc_info=True)
+            self.process_triggered.emit(settings)
+        else:
+            logging.error("Processing signal not emitted due to settings error.")
 
 
     def setEnabled(self, enabled: bool):
-        """Overrides setEnabled to also control the 'Fit All' button and clear display if disabled."""
+        """Overrides setEnabled to also control the main action button."""
         super().setEnabled(enabled)
         try:
-            # Also enable/disable the main action button
-            self.fit_button.setEnabled(enabled)
-            # If the whole panel is disabled, clear the details view for clarity
-            if not enabled:
-                self.display_peak_fit_details(None, None) # Clear details
+            # Ensure the process button reflects the overall enabled state
+            self.process_button.setEnabled(enabled)
         except Exception as e:
              logging.error(f"Error in setEnabled override: {e}", exc_info=True)
 
-    def _show_model_select_info(self):
-        """Shows help information about AIC/BIC."""
-        QMessageBox.information(self, "Model Selection Criterion Help",
-            "This setting determines how the 'best' fit profile is automatically chosen when multiple profiles (Gaussian, Lorentzian, PseudoVoigt) are attempted:\n\n"
-            "- **AIC (Akaike Information Criterion):** Balances goodness of fit with model complexity (number of parameters). Generally preferred when prediction is the goal. Lower is better.\n\n"
-            "- **BIC (Bayesian Information Criterion):** Similar to AIC, but penalizes model complexity more strongly. Tends to favor simpler models, especially with more data. Lower is better.\n\n"
-            "The profile with the *lowest* score (AIC or BIC) is typically selected as the best fit (*).")
 
-# --- END OF REFACTORED FILE libs_cosmic_forge/ui/views/control_panel_view.py ---
+# --- END OF MODIFIED FILE libs_cosmic_forge/ui/views/control_panel_view.py ---

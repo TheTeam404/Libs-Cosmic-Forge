@@ -27,6 +27,13 @@ processing:
   smoothing:
     default_method: 'SavitzkyGolay' # Options: 'SavitzkyGolay', 'None'
     savitzky_golay: { window_length: 11, polyorder: 3 }
+  denoising: # <-- NEW SECTION ADDED
+    default_method: 'Wavelet' # Options: 'Wavelet', 'None'
+    wavelet:
+      wavelet_type: 'db8'   # Default Daubechies wavelet (e.g., 'db4', 'db8', 'sym8', 'coif5')
+      level: 4              # Default decomposition level (adjust based on signal length/noise)
+      mode: 'soft'          # Thresholding mode ('soft' or 'hard')
+      threshold_sigma_factor: 3.0 # Factor times Median Absolute Deviation for threshold
   noise_analysis: {} # Placeholder
 
 # --- Peak Detection Defaults ---
@@ -35,8 +42,8 @@ peak_detection:
   scipy_find_peaks:
     relative_height_percent: 5.0
     min_distance_points: 5
-    width: 0       # <-- Corrected: Replaced null with integer 0
-    prominence: 0.0  # <-- Corrected: Replaced null with float 0.0
+    width: 0
+    prominence: 0.0
 
 # --- Peak Fitting Defaults ---
 peak_fitting:
