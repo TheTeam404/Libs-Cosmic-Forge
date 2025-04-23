@@ -177,14 +177,17 @@ class PeakDetectionControlPanel(QWidget):
         """Returns the current peak detection settings as a dictionary."""
         method=self.peak_method_combo.currentText(); settings={'method':method}
         if method=='ScipyFindPeaks':
-            settings['relative_height_percent']=self.peak_rel_height_dspin.value()
+            # ***** CORRECTED KEY *****
+            settings['rel_height_percent']=self.peak_rel_height_dspin.value()
+            # *************************
             settings['min_distance_points']=self.peak_min_dist_spin.value()
+            # ***** CORRECTED KEY *****
             settings['min_width_points']=w if (w:=self.peak_min_width_spin.value())>0 else None
+            # *************************
             settings['prominence']=p if (p:=self.peak_prominence_dspin.value())>0 else None
         elif method=='NISTGuided':
             settings['search_tolerance_nm']=self.nist_tolerance_dspin.value()
             settings['min_prominence_factor']=self.nist_prom_factor_dspin.value()
-            # TODO: Get selected NIST species if added later
             settings['nist_lines_source']="Placeholder - Needs UI for species selection"
         logging.debug(f"Retrieved detection settings: {settings}"); return settings
 

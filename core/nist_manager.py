@@ -80,8 +80,8 @@ def search_online_nist(wavelength_nm: float,
         table = Nist.query(min_wave_aa, max_wave_aa,
                            energy_level_unit="eV", # Ensure energy levels are in eV
                            output_order="wavelength", # Sort results by wavelength
-                           wavelength_type="vacuum", # Request vacuum wavelengths
-                           timeout=timeout_s)
+                           wavelength_type="vacuum" # Request vacuum wavelengths
+                           )
 
         if table is None or len(table) == 0:
             logging.info(f"No lines found online for range around {wavelength_nm:.3f} nm.")

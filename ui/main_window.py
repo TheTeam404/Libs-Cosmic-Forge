@@ -1942,7 +1942,7 @@ class MainWindow(QMainWindow):
             # but correlation might need update if fitted wavelengths shifted significantly.
             # Re-running correlation might be safest.
             self._correlate_nist_matches_to_peaks()
-            if self.plot_widget: self.plot_widget.plot_nist_matches(self.nist_matches, correlate=False) # Replot possibly updated correlations
+            if self.plot_widget: self.plot_widget.plot_nist_matches(self.nist_matches, correlate=True) # Replot possibly updated correlations
 
 
             # Update save action states (peak data now includes fits, others cleared/updated)

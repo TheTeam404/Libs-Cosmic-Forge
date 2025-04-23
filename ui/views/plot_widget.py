@@ -752,51 +752,108 @@ class SpectrumPlotWidget(QWidget):
 
     def _on_hover(self, event):
         """ Handles mouse motion events over the canvas for hover effects. """
+        # Check if the mouse event occurred within the plot axes
         if not event.inaxes == self.ax:
-            if self.annot.get_visible(): self.annot.set_visible(False); self._redraw_canvas()
+            # If mouse is outside axes, hide annotation if it's visible
+            if self.annot.get_visible():
+                self.annot.set_visible(False)
+                self._redraw_canvas() # Redraw needed to hide annotation
             return
 
-        target_element: Optional[Artist] = None; info: Dict[str, Any] = {}; min_dist_sq = float('inf')
+        # --- Find Hovered Element ---
+        # Prioritize scatter points (peaks) over lines
+        target_element: Optional[Artist] = None
+        info: Dict[str, Any] = {} # Dictionary to store data about the hovered point
+        min_dist_sq = float('inf') # Used for finding closest point on lines
+
+        # 1. Check Peak Markers (Scatter Plots)
+        # Combine detected and fitted peak scatter artists for checking
         peak_scatters = [s for s in [self._plot_elements.get('det'), self._plot_elements.get('fit')] if isinstance(s, PathCollection)]
         for scatter in peak_scatters:
-            contains, ind_dict = scatter.contains(event)
+            contains, ind_dict = scatter.contains(event) # Check if event is within picker radius
             if contains:
                 scatter_indices = ind_dict['ind']
                 if len(scatter_indices) > 0:
-                    offsets = scatter.get_offsets(); points_in_radius = offsets[scatter_indices]
-                    distances = np.sum((points_in_radius - [event.xdata, event.ydata])**2, axis=1); closest_idx_in_subset = np.argmin(distances)
-                    scatter_index = scatter_indices[closest_idx_in_subset]
-                    if scatter_index < len(offsets):
-                        target_element = scatter; pos = offsets[scatter_index]; info = {'x': pos[0], 'y': pos[1]}
-                        peak_list_indices = getattr(scatter, 'peak_list_indices', None)
-                        if peak_list_indices and isinstance(peak_list_indices, list) and scatter_index < len(peak_list_indices):
-                            original_list_index = peak_list_indices[scatter_index]
-                            if 0 <= original_list_index < len(self._peaks_ref):
-                                peak_obj = self._peaks_ref[original_list_index]
-                                if peak_obj and hasattr(peak_obj, 'to_dataframe_row'): info['peak_info'] = peak_obj.to_dataframe_row()
-                                else: info['peak_info'] = {'Index': original_list_index}
-                        break # Found scatter point
+                    # Find the closest point within the picked indices (usually just one)
+                    offsets = scatter.get_offsets() # Get all (x, y) coordinates of the scatter plot
+                    # Ensure scatter_indices are valid before using them
+                    valid_scatter_indices = [idx for idx in scatter_indices if idx < len(offsets)]
+                    if not valid_scatter_indices: continue # Skip if indices are out of bounds
+
+                    points_in_radius = offsets[valid_scatter_indices]
+                    distances = np.sum((points_in_radius - [event.xdata, event.ydata])**2, axis=1)
+                    closest_local_idx = np.argmin(distances)
+                    # Map back to the original index in the scatter data array using the valid indices
+                    scatter_index = valid_scatter_indices[closest_local_idx]
+
+                    target_element = scatter
+                    pos = offsets[scatter_index]
+                    info = {'x': pos[0], 'y': pos[1]}
+
+                    # Retrieve the original peak list index stored on the artist
+                    peak_list_indices = getattr(scatter, 'peak_list_indices', None)
+                    if peak_list_indices and isinstance(peak_list_indices, list) and scatter_index < len(peak_list_indices):
+                        original_list_index = peak_list_indices[scatter_index]
+                        # Get detailed info from the referenced Peak object
+                        if 0 <= original_list_index < len(self._peaks_ref):
+                            peak_obj = self._peaks_ref[original_list_index]
+                            if peak_obj and hasattr(peak_obj, 'to_dataframe_row'):
+                                try: info['peak_info'] = peak_obj.to_dataframe_row() # Call method safely
+                                except Exception as e_info: logging.warning(f"Error getting peak info via to_dataframe_row: {e_info}"); info['peak_info'] = {'Index': original_list_index}
+                            else: info['peak_info'] = {'Index': original_list_index} # Basic fallback
+                    break # Found a scatter point, stop searching
+
+        # 2. Check Lines (Spectrum, Baseline, Fit Lines) if no peak marker found
         if target_element is None:
             lines_to_check: List[Line2D] = []
+            # Add main spectrum/baseline lines
             for key in ['proc', 'raw', 'base']:
-                 line = self._plot_elements.get(key);
+                 line = self._plot_elements.get(key)
                  if isinstance(line, Line2D): lines_to_check.append(line)
+            # Add individual fit lines
             fits_dict = self._plot_elements.get('fits')
-            if isinstance(fits_dict, dict): lines_to_check.extend(l for l in fits_dict.values() if isinstance(l, Line2D))
+            if isinstance(fits_dict, dict):
+                 lines_to_check.extend(l for l in fits_dict.values() if isinstance(l, Line2D))
+
             for line in lines_to_check:
-                 contains, ind_dict = line.contains(event, radius=5)
+                 # ***** CORRECTED LINE *****
+                 # Use Line2D.contains without the 'radius' argument.
+                 # Tolerance is controlled by line.get_pickradius()
+                 contains, ind_dict = line.contains(event)
+                 # ***** END CORRECTION *****
+
                  if contains:
-                     x_data, y_data = line.get_data(); indices = ind_dict['ind']
+                     x_data, y_data = line.get_data()
+                     # Check if data exists and is not empty
+                     if x_data is None or y_data is None or len(x_data) == 0 or len(y_data) == 0: continue
+
+                     indices = ind_dict.get('ind', []) # Safely get indices, default to empty list
                      if len(indices) > 0:
-                          distances_sq = (x_data[indices] - event.xdata)**2 + (y_data[indices] - event.ydata)**2
-                          closest_local_idx = np.argmin(distances_sq); closest_dist_sq = distances_sq[closest_local_idx]
+                          # Ensure indices are within bounds
+                          valid_indices = [idx for idx in indices if idx < len(x_data)]
+                          if not valid_indices: continue
+
+                          # Find the closest point among the nearby valid indices
+                          distances_sq = (x_data[valid_indices] - event.xdata)**2 + (y_data[valid_indices] - event.ydata)**2
+                          closest_local_idx = np.argmin(distances_sq)
+                          closest_dist_sq = distances_sq[closest_local_idx]
+
+                          # If this point is closer than any found on other lines, update target
                           if closest_dist_sq < min_dist_sq:
-                               min_dist_sq = closest_dist_sq; target_element = line
-                               global_index = indices[closest_local_idx]
+                               min_dist_sq = closest_dist_sq
+                               target_element = line
+                               global_index = valid_indices[closest_local_idx] # Index in the full x_data/y_data
                                info = {'x': x_data[global_index], 'y': y_data[global_index]}
 
-        if target_element: self._update_annotation(target_element, info); self._redraw_canvas()
-        elif self.annot.get_visible(): self.annot.set_visible(False); self._redraw_canvas()
+        # --- Update or Hide Annotation ---
+        if target_element:
+            # If an element is found, update and show the annotation
+            self._update_annotation(target_element, info)
+            self._redraw_canvas() # Redraw needed to show/update annotation
+        elif self.annot.get_visible():
+            # If no element is hovered but annotation is visible, hide it
+            self.annot.set_visible(False)
+            self._redraw_canvas() # Redraw needed to hide annotation
 
     def _on_pick(self, event):
         """ Handles pick events (typically clicks) on artists with 'picker' enabled. """

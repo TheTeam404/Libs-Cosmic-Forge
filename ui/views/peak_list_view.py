@@ -175,7 +175,7 @@ class PeakListView(QWidget):
         self.peak_table.setItem(table_row_idx, col_map["Index"], create_item(peak.index, precision=0, alignment=Qt.AlignmentFlag.AlignCenter|Qt.AlignmentFlag.AlignVCenter, store_index=True))
         self.peak_table.setItem(table_row_idx, col_map["WL (Detected)"], create_item(peak.wavelength_detected, 4))
         self.peak_table.setItem(table_row_idx, col_map["Intensity (Proc)"], create_item(peak.intensity_processed, 1))
-        self.peak_table.setItem(table_row_idx, col_map["Intensity (Raw)"], create_item(peak.intensity_raw, 1))
+        self.peak_table.setItem(table_row_idx, col_map["Raw Intensity"], create_item(peak.intensity_raw, 1))
 
         # Fit results (check if best_fit exists)
         fit = peak.best_fit
