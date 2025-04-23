@@ -4,8 +4,8 @@ Control Panel View for Spectrum Processing settings (Baseline, Denoising, Smooth
 Uses CollapsibleBox widgets for organization.
 """
 import logging
-import numpy as np # Keep if needed for other parts, not directly used here
-import pandas as pd # Keep if needed for other parts, not directly used here
+import numpy as np
+import pandas as pd
 from typing import List, Optional, Dict, Any
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QFormLayout, QSpinBox,
@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QFormLayout, QSpin
                              QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
                              QAbstractItemView, QMessageBox, QSizePolicy)
 from PyQt6.QtCore import pyqtSignal, Qt, QVariant, pyqtSlot
-from PyQt6.QtGui import QFont, QColor, QBrush , QAction, QIcon # Added QIcon
+from PyQt6.QtGui import QFont, QColor, QBrush , QAction, QIcon
 
 # Attempt to import necessary components, provide clear errors if missing
 try:
@@ -36,6 +36,16 @@ class ProcessingControlPanel(QWidget):
         self.processing_config = config.get('processing', {})
         self.config = self.processing_config # Keep self.config for compatibility if needed
         self._dark_mode: bool = False # Track theme if needed for styling
+
+        # --- Add attributes to store layout references --- ## ADDED ##
+        self.baseline_layout: Optional[QFormLayout] = None
+        self.denoising_layout: Optional[QFormLayout] = None
+        self.smoothing_layout: Optional[QFormLayout] = None
+        self.wavelet_params_widget: Optional[QWidget] = None # Keep reference to container
+        self.savitzky_params_widget: Optional[QWidget] = None # Keep reference to container
+        # Keep references to the row widgets for setRowVisible ## ADDED ##
+        self.poly_order_row_widget: Optional[QWidget] = None
+        self.snip_iter_row_widget: Optional[QWidget] = None
 
         # --- List of available wavelets (can be expanded) ---
         # Common wavelets suitable for signal processing
@@ -64,61 +74,68 @@ class ProcessingControlPanel(QWidget):
         # --- Baseline Correction Parameters ---
         self.baseline_box = CollapsibleBox("1. Baseline Correction", self, is_expanded=True)
         baseline_content = QWidget()
-        baseline_layout = QFormLayout(baseline_content)
-        baseline_layout.setContentsMargins(8, 8, 8, 8)
-        baseline_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        baseline_layout.setHorizontalSpacing(10)
-        baseline_layout.setVerticalSpacing(8)
+        # Store reference to the QFormLayout ## STORED ##
+        self.baseline_layout = QFormLayout(baseline_content)
+        self.baseline_layout.setContentsMargins(8, 8, 8, 8)
+        self.baseline_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.baseline_layout.setHorizontalSpacing(10)
+        self.baseline_layout.setVerticalSpacing(8)
 
         # Baseline Method Combo
         self.baseline_method_combo = QComboBox()
         self.baseline_method_combo.addItems(["Polynomial", "SNIP", "None"])
         self.baseline_method_combo.setToolTip("Select the baseline correction algorithm.")
         self.baseline_method_combo.currentTextChanged.connect(self._update_parameter_visibility)
-        baseline_layout.addRow("Method:", self.baseline_method_combo)
+        self.baseline_layout.addRow("Method:", self.baseline_method_combo)
 
         # Polynomial Order (visible only if Polynomial selected)
         self.baseline_poly_order_spin = QSpinBox()
         self.baseline_poly_order_spin.setRange(0, 10)
         self.baseline_poly_order_spin.setToolTip("Order of the polynomial for baseline fitting.")
-        self.poly_order_row_widget = QWidget() # Container for row items
+        # Store reference to the widget added to the row ## STORED ##
+        self.poly_order_row_widget = QWidget()
         poly_order_row_layout = QHBoxLayout(self.poly_order_row_widget)
         poly_order_row_layout.setContentsMargins(0,0,0,0)
         poly_order_row_layout.addWidget(self.baseline_poly_order_spin)
         poly_order_row_layout.addWidget(InfoButton(lambda: QMessageBox.information(self, "Polynomial Order", "Sets the degree of the polynomial function used to fit the baseline points (selected by percentile). Low orders (1-3) are common.")))
-        self.poly_order_form_row = baseline_layout.addRow("Polynomial Order:", self.poly_order_row_widget)
+        # Add the container widget to the form layout row
+        self.baseline_layout.addRow("Polynomial Order:", self.poly_order_row_widget)
 
         # SNIP Iterations (visible only if SNIP selected)
         self.baseline_snip_iter_spin = QSpinBox()
         self.baseline_snip_iter_spin.setRange(1, 500)
         self.baseline_snip_iter_spin.setToolTip("Number of iterations (clipping window sizes) for the SNIP algorithm.")
-        self.snip_iter_row_widget = QWidget() # Container for row items
+        # Store reference to the widget added to the row ## STORED ##
+        self.snip_iter_row_widget = QWidget()
         snip_iter_row_layout = QHBoxLayout(self.snip_iter_row_widget)
         snip_iter_row_layout.setContentsMargins(0,0,0,0)
         snip_iter_row_layout.addWidget(self.baseline_snip_iter_spin)
         snip_iter_row_layout.addWidget(InfoButton(lambda: QMessageBox.information(self, "SNIP Iterations", "Controls the smoothness of the SNIP baseline. Higher iterations remove broader features.")))
-        self.snip_iter_form_row = baseline_layout.addRow("SNIP Iterations:", self.snip_iter_row_widget)
+        # Add the container widget to the form layout row
+        self.baseline_layout.addRow("SNIP Iterations:", self.snip_iter_row_widget)
 
-        self.baseline_box.setContentLayout(baseline_layout)
+        self.baseline_box.setContentLayout(self.baseline_layout) # Use the stored layout
         main_layout.addWidget(self.baseline_box)
 
         # --- Denoising Parameters --- ## NEW SECTION ##
         self.denoising_box = CollapsibleBox("2. Denoising", self, is_expanded=True)
         denoising_content = QWidget()
-        denoising_layout = QFormLayout(denoising_content)
-        denoising_layout.setContentsMargins(8, 8, 8, 8)
-        denoising_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        denoising_layout.setHorizontalSpacing(10)
-        denoising_layout.setVerticalSpacing(8)
+        # Store reference ## STORED ##
+        self.denoising_layout = QFormLayout(denoising_content)
+        self.denoising_layout.setContentsMargins(8, 8, 8, 8)
+        self.denoising_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.denoising_layout.setHorizontalSpacing(10)
+        self.denoising_layout.setVerticalSpacing(8)
 
         # Denoising Method Combo
         self.denoising_method_combo = QComboBox()
         self.denoising_method_combo.addItems(["Wavelet", "None"])
         self.denoising_method_combo.setToolTip("Select the denoising algorithm to apply after baseline correction.")
         self.denoising_method_combo.currentTextChanged.connect(self._update_parameter_visibility)
-        denoising_layout.addRow("Method:", self.denoising_method_combo)
+        self.denoising_layout.addRow("Method:", self.denoising_method_combo)
 
         # -- Wavelet Parameters (Container) --
+        # Store reference ## STORED ##
         self.wavelet_params_widget = QWidget() # Container for wavelet params
         wavelet_params_layout = QFormLayout(self.wavelet_params_widget)
         wavelet_params_layout.setContentsMargins(0, 0, 0, 0) # No extra margins needed inside
@@ -147,28 +164,30 @@ class ProcessingControlPanel(QWidget):
         wavelet_params_layout.addRow("Threshold Factor:", self.wavelet_threshold_factor_dspin)
 
         # Add wavelet container widget to the main denoising layout
-        denoising_layout.addRow(self.wavelet_params_widget)
-        self.denoising_box.setContentLayout(denoising_layout)
+        self.denoising_layout.addRow(self.wavelet_params_widget)
+        self.denoising_box.setContentLayout(self.denoising_layout) # Use stored layout
         main_layout.addWidget(self.denoising_box)
         # -- End Denoising Section --
 
         # --- Smoothing Parameters ---
         self.smoothing_box = CollapsibleBox("3. Smoothing", self, is_expanded=True)
         smoothing_content = QWidget()
-        smoothing_layout = QFormLayout(smoothing_content)
-        smoothing_layout.setContentsMargins(8, 8, 8, 8)
-        smoothing_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        smoothing_layout.setHorizontalSpacing(10)
-        smoothing_layout.setVerticalSpacing(8)
+        # Store reference ## STORED ##
+        self.smoothing_layout = QFormLayout(smoothing_content)
+        self.smoothing_layout.setContentsMargins(8, 8, 8, 8)
+        self.smoothing_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.smoothing_layout.setHorizontalSpacing(10)
+        self.smoothing_layout.setVerticalSpacing(8)
 
         # Smoothing Method Combo
         self.smoothing_method_combo = QComboBox()
         self.smoothing_method_combo.addItems(["SavitzkyGolay", "None"])
         self.smoothing_method_combo.setToolTip("Select the smoothing algorithm to apply after denoising.")
         self.smoothing_method_combo.currentTextChanged.connect(self._update_parameter_visibility)
-        smoothing_layout.addRow("Method:", self.smoothing_method_combo)
+        self.smoothing_layout.addRow("Method:", self.smoothing_method_combo)
 
         # Savitzky-Golay Parameters (Container)
+        # Store reference ## STORED ##
         self.savitzky_params_widget = QWidget() # Container
         savitzky_params_layout = QFormLayout(self.savitzky_params_widget)
         savitzky_params_layout.setContentsMargins(0, 0, 0, 0)
@@ -185,8 +204,8 @@ class ProcessingControlPanel(QWidget):
         savitzky_params_layout.addRow("Polyorder:", self.sg_polyorder_spin)
 
         # Add SG container to main smoothing layout
-        smoothing_layout.addRow(self.savitzky_params_widget)
-        self.smoothing_box.setContentLayout(smoothing_layout)
+        self.smoothing_layout.addRow(self.savitzky_params_widget)
+        self.smoothing_box.setContentLayout(self.smoothing_layout) # Use stored layout
         main_layout.addWidget(self.smoothing_box)
 
         # --- Apply Button ---
@@ -241,33 +260,33 @@ class ProcessingControlPanel(QWidget):
     def _update_parameter_visibility(self, text: Optional[str] = None, initial_setup: bool = False):
         """Shows/hides parameter widgets based on selected method. If initial_setup is True, uses current combo texts."""
         # Determine current methods
-        if initial_setup:
-            baseline_method = self.baseline_method_combo.currentText()
-            denoising_method = self.denoising_method_combo.currentText()
-            smoothing_method = self.smoothing_method_combo.currentText()
-        else:
-            # Get current text from all combos as any *might* have changed
-            baseline_method = self.baseline_method_combo.currentText()
-            denoising_method = self.denoising_method_combo.currentText()
-            smoothing_method = self.smoothing_method_combo.currentText()
+        baseline_method = self.baseline_method_combo.currentText()
+        denoising_method = self.denoising_method_combo.currentText()
+        smoothing_method = self.smoothing_method_combo.currentText()
 
+        # --- FIX: Use the stored layout references and correct widgets ---
         # Baseline visibility
-        show_poly = baseline_method == "Polynomial"
-        show_snip = baseline_method == "SNIP"
-        # Use setRowVisible directly if parent is QFormLayout
-        self.baseline_box.layout().setRowVisible(self.poly_order_form_row, show_poly)
-        self.baseline_box.layout().setRowVisible(self.snip_iter_form_row, show_snip)
+        if self.baseline_layout: # Check if layout exists
+            show_poly = baseline_method == "Polynomial"
+            show_snip = baseline_method == "SNIP"
+            # Use the row's *widget* to control visibility with setRowVisible
+            if self.poly_order_row_widget:
+                 self.baseline_layout.setRowVisible(self.poly_order_row_widget, show_poly)
+            if self.snip_iter_row_widget:
+                 self.baseline_layout.setRowVisible(self.snip_iter_row_widget, show_snip)
 
-        # Denoising visibility ## NEW SECTION ##
-        show_wavelet = denoising_method == "Wavelet"
-        self.wavelet_params_widget.setVisible(show_wavelet)
+        # Denoising visibility
+        if self.wavelet_params_widget: # Check if widget exists
+            show_wavelet = denoising_method == "Wavelet"
+            self.wavelet_params_widget.setVisible(show_wavelet)
 
         # Smoothing visibility
-        show_sg = smoothing_method == "SavitzkyGolay"
-        self.savitzky_params_widget.setVisible(show_sg)
+        if self.savitzky_params_widget: # Check if widget exists
+            show_sg = smoothing_method == "SavitzkyGolay"
+            self.savitzky_params_widget.setVisible(show_sg)
 
-        # Adjust layout sizes if needed (might help with collapsible boxes)
-        # self.adjustSize() # Can sometimes cause issues, use with caution
+        # Adjust layout sizes if needed (optional)
+        # QTimer.singleShot(0, self.adjustSize) # Defer adjustSize slightly
 
 
     def get_settings(self) -> dict:
@@ -279,12 +298,10 @@ class ProcessingControlPanel(QWidget):
             settings['baseline_method'] = baseline_method
             if baseline_method == "Polynomial":
                 settings['poly_order'] = self.baseline_poly_order_spin.value()
-                # Include percentile if it's a configurable parameter (assuming it might be added later)
-                # settings['percentile'] = self.baseline_poly_percentile_dspin.value()
+                settings['percentile'] = self.processing_config.get('baseline', {}).get('percentile', 10.0) # Get percentile from config
             elif baseline_method == "SNIP":
-                settings['num_iterations'] = self.baseline_snip_iter_spin.value()
-                # Include increasing_window if added as a control
-                # settings['increasing_window'] = self.baseline_snip_inc_window_check.isChecked()
+                settings['max_iterations'] = self.baseline_snip_iter_spin.value() # Use correct key for SNIP iter
+                settings['increasing_window'] = self.processing_config.get('baseline', {}).get('snip_increasing_window', True) # Get from config
 
             # Denoising ## NEW SECTION ##
             denoising_method = self.denoising_method_combo.currentText()
@@ -299,16 +316,13 @@ class ProcessingControlPanel(QWidget):
             smoothing_method = self.smoothing_method_combo.currentText()
             settings['smoothing_method'] = smoothing_method
             if smoothing_method == "SavitzkyGolay":
-                settings['window_length'] = self.sg_window_spin.value()
-                settings['polyorder'] = self.sg_polyorder_spin.value()
+                settings['smoothing_window'] = self.sg_window_spin.value() # Renamed key for clarity
+                settings['smoothing_polyorder'] = self.sg_polyorder_spin.value() # Renamed key for clarity
                 # Basic validation check
-                if settings['window_length'] <= settings['polyorder']:
-                     logging.warning(f"Savitzky-Golay window length ({settings['window_length']}) should be greater than polyorder ({settings['polyorder']}).")
-                     # Decide how to handle: Raise error, use defaults, skip step?
-                     # For now, just log the warning. Processing function should handle/adjust.
-                if settings['window_length'] % 2 == 0:
-                     logging.warning(f"Savitzky-Golay window length ({settings['window_length']}) should be odd.")
-                     # Processing function should handle/adjust.
+                if settings['smoothing_window'] <= settings['smoothing_polyorder']:
+                     logging.warning(f"Savitzky-Golay window length ({settings['smoothing_window']}) should be greater than polyorder ({settings['smoothing_polyorder']}).")
+                if settings['smoothing_window'] % 2 == 0:
+                     logging.warning(f"Savitzky-Golay window length ({settings['smoothing_window']}) should be odd.")
 
             logging.debug(f"Gathered processing settings: {settings}")
             return settings
@@ -326,8 +340,8 @@ class ProcessingControlPanel(QWidget):
             logging.info("Apply Processing button clicked. Emitting signal.")
             # Perform quick validation specific to SavGol here if needed
             if settings.get('smoothing_method') == 'SavitzkyGolay':
-                 wl = settings.get('window_length', 0)
-                 po = settings.get('polyorder', 0)
+                 wl = settings.get('smoothing_window', 0) # Use updated key
+                 po = settings.get('smoothing_polyorder', 0) # Use updated key
                  if wl % 2 == 0:
                       reply = QMessageBox.warning(self, "SG Window Even",
                                                   f"Savitzky-Golay Window Length ({wl}) should be odd.\n"
