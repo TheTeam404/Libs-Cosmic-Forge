@@ -4,6 +4,9 @@ Control Panel View for Spectrum Processing settings (Baseline, Denoising, Smooth
 Uses CollapsibleBox widgets for organization.
 """
 import logging
+from matplotlib.artist import Artist
+from matplotlib.collections import PathCollection
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 from typing import List, Optional, Dict, Any
@@ -257,36 +260,94 @@ class ProcessingControlPanel(QWidget):
             logging.error(f"Error loading processing panel defaults: {e}", exc_info=True)
 
 
-    def _update_parameter_visibility(self, text: Optional[str] = None, initial_setup: bool = False):
-        """Shows/hides parameter widgets based on selected method. If initial_setup is True, uses current combo texts."""
-        # Determine current methods
-        baseline_method = self.baseline_method_combo.currentText()
-        denoising_method = self.denoising_method_combo.currentText()
-        smoothing_method = self.smoothing_method_combo.currentText()
+    def _on_hover(self, event):
+        """ Handles mouse motion events over the canvas for hover effects. """
+        if not event.inaxes == self.ax:
+            if self.annot.get_visible(): self.annot.set_visible(False); self._redraw_canvas()
+            return
 
-        # --- FIX: Use the stored layout references and correct widgets ---
-        # Baseline visibility
-        if self.baseline_layout: # Check if layout exists
-            show_poly = baseline_method == "Polynomial"
-            show_snip = baseline_method == "SNIP"
-            # Use the row's *widget* to control visibility with setRowVisible
-            if self.poly_order_row_widget:
-                 self.baseline_layout.setRowVisible(self.poly_order_row_widget, show_poly)
-            if self.snip_iter_row_widget:
-                 self.baseline_layout.setRowVisible(self.snip_iter_row_widget, show_snip)
+        target_element: Optional[Artist] = None; info: Dict[str, Any] = {}; min_dist_sq = float('inf')
+        peak_scatters = [s for s in [self._plot_elements.get('det'), self._plot_elements.get('fit')] if isinstance(s, PathCollection)]
+        # --- Check Scatter Points First ---
+        for scatter in peak_scatters:
+            contains, ind_dict = scatter.contains(event)
+            if contains:
+                # ... (rest of scatter point handling remains the same) ...
+                scatter_indices = ind_dict['ind']
+                if len(scatter_indices) > 0:
+                    offsets = scatter.get_offsets(); points_in_radius = offsets[scatter_indices]
+                    distances = np.sum((points_in_radius - [event.xdata, event.ydata])**2, axis=1); closest_idx_in_subset = np.argmin(distances)
+                    scatter_index = scatter_indices[closest_idx_in_subset]
+                    if scatter_index < len(offsets):
+                        target_element = scatter; pos = offsets[scatter_index]; info = {'x': pos[0], 'y': pos[1]}
+                        peak_list_indices = getattr(scatter, 'peak_list_indices', None)
+                        if peak_list_indices and isinstance(peak_list_indices, list) and scatter_index < len(peak_list_indices):
+                            original_list_index = peak_list_indices[scatter_index]
+                            if 0 <= original_list_index < len(self._peaks_ref):
+                                peak_obj = self._peaks_ref[original_list_index]
+                                if peak_obj and hasattr(peak_obj, 'to_dataframe_row'): info['peak_info'] = peak_obj.to_dataframe_row()
+                                else: info['peak_info'] = {'Index': original_list_index}
+                        break # Found scatter point
 
-        # Denoising visibility
-        if self.wavelet_params_widget: # Check if widget exists
-            show_wavelet = denoising_method == "Wavelet"
-            self.wavelet_params_widget.setVisible(show_wavelet)
+        # --- Check Lines ONLY if no scatter point was found ---
+        if target_element is None:
+            lines_to_check: List[Line2D] = []
+            for key in ['proc', 'raw', 'base']:
+                 line = self._plot_elements.get(key);
+                 if isinstance(line, Line2D): lines_to_check.append(line)
+            fits_dict = self._plot_elements.get('fits')
+            if isinstance(fits_dict, dict): lines_to_check.extend(l for l in fits_dict.values() if isinstance(l, Line2D))
 
-        # Smoothing visibility
-        if self.savitzky_params_widget: # Check if widget exists
-            show_sg = smoothing_method == "SavitzkyGolay"
-            self.savitzky_params_widget.setVisible(show_sg)
+            for line in lines_to_check:
+                 # --- FIX: Remove radius argument ---
+                 contains, ind_dict = line.contains(event) # No radius here
+                 # --- End Fix ---
+                 if contains:
+                     # Determine nearest point manually (more reliable than line.contains with radius)
+                     x_data, y_data = line.get_data()
+                     if len(x_data) == 0: continue # Skip empty lines
 
-        # Adjust layout sizes if needed (optional)
-        # QTimer.singleShot(0, self.adjustSize) # Defer adjustSize slightly
+                     # Transform event coords to data coords if needed (event.xdata/ydata are usually already data)
+                     # Calculate squared distance in data coordinates
+                     distances_sq = (x_data - event.xdata)**2 + (y_data - event.ydata)**2
+
+                     # Check distance against a threshold (in data units squared) - This replaces the radius check
+                     # Define a suitable threshold (e.g., equivalent to 5 display pixels)
+                     # This is approximate and might need tuning
+                     pixel_threshold = 5
+                     x_range = self.ax.get_xlim()[1] - self.ax.get_xlim()[0]
+                     y_range = self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
+                     ax_width_pixels, ax_height_pixels = self.ax.get_window_extent().size
+                     try:
+                         x_threshold = (x_range / ax_width_pixels * pixel_threshold) if ax_width_pixels > 0 else 0.01 * x_range
+                         y_threshold = (y_range / ax_height_pixels * pixel_threshold) if ax_height_pixels > 0 else 0.01 * y_range
+                         dist_threshold_sq = x_threshold**2 + y_threshold**2 # Simple bounding box approx
+                     except Exception: # Handle division by zero etc.
+                         dist_threshold_sq = (0.01 * x_range)**2 + (0.01 * y_range)**2 # Fallback
+
+
+                     valid_indices = np.where(distances_sq <= dist_threshold_sq)[0]
+
+                     if len(valid_indices) > 0:
+                          # Find the absolutely closest index among those within threshold
+                          closest_idx_in_threshold = valid_indices[np.argmin(distances_sq[valid_indices])]
+                          current_dist_sq = distances_sq[closest_idx_in_threshold]
+
+                          # If this line point is closer than any previous candidate
+                          if current_dist_sq < min_dist_sq:
+                               min_dist_sq = current_dist_sq
+                               target_element = line
+                               info = {'x': x_data[closest_idx_in_threshold], 'y': y_data[closest_idx_in_threshold]}
+
+
+        # --- Update Annotation ---
+        if target_element:
+            self._update_annotation(target_element, info)
+            self._redraw_canvas()
+        elif self.annot.get_visible():
+            # Hide annotation if mouse is not over any relevant element
+            self.annot.set_visible(False)
+            self._redraw_canvas()
 
 
     def get_settings(self) -> dict:
