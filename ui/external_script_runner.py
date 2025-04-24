@@ -1,345 +1,78 @@
-# --- START OF REVISED external_script_runner.py ---
+# -*- coding: utf-8 -*-
 """
-Utility functions and a dialog for running external scripts.
+Utility functions and a dialog for running external scripts/commands.
 
 Contains:
-- get_project_root: Finds the project root directory.
-- setup_logging: Configures application logging.
-- ensure_odd: Utility math function.
-- ExternalScriptRunnerDialog: A PyQt dialog to run external commands/scripts.
+- ExternalScriptRunnerDialog: A PyQt dialog to execute external processes using QProcess,
+                               displaying stdout/stderr in real-time.
+
+Note: Utility functions (get_project_root, setup_logging, ensure_odd) previously
+      in this file are assumed to be accessible via the 'utils.helpers' module
+      if needed elsewhere in the project. They are removed from here to keep
+      this file focused on the script runner dialog.
 """
 
 import os
 import sys
 import logging
-import subprocess # QProcess uses this underlying mechanism
-from logging.handlers import RotatingFileHandler
-from typing import Dict, Any, Optional, List
+import shlex   # For robust argument splitting
+import locale  # For getting default system encoding
+import subprocess # Underlying mechanism, useful for context
 
 # --- PyQt Imports (Needed for the Dialog) ---
+_QT_AVAILABLE = False
 try:
     from PyQt6.QtWidgets import (
         QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-        QPlainTextEdit, QFileDialog, QMessageBox, QDialogButtonBox,
-        QSizePolicy, QApplication, QWidget # QApplication needed for standalone testing
+        QPlainTextEdit, QFileDialog, QMessageBox, QDialogButtonBox, QTextEdit, # Added QTextEdit for potential env vars
+        QSizePolicy, QApplication, QWidget
     )
-    from PyQt6.QtCore import QProcess, Qt, pyqtSlot
-    from PyQt6.QtGui import QFont , QAction
+    from PyQt6.QtCore import QProcess, Qt, pyqtSlot, QProcessEnvironment, QTimer # Added QProcessEnvironment, QTimer
+    from PyQt6.QtGui import QFont, QIcon # Added QIcon
     _QT_AVAILABLE = True
 except ImportError:
-    _QT_AVAILABLE = False
-    # Define dummy classes if PyQt is not available, so the rest of the file parses
-    # This allows the utility functions to be used even if PyQt isn't installed,
-    # but the Dialog cannot be instantiated.
+    # Define dummy classes if PyQt is not available
     class QDialog: pass
     class QProcess: pass
     class QPushButton: pass
     class QPlainTextEdit: pass
-    # Add others as needed if referenced directly outside the class
+    class QLineEdit: pass # Add missing dummies
+    class QLabel: pass
+    class QVBoxLayout: pass
+    class QHBoxLayout: pass
+    class QFileDialog: pass
+    class QMessageBox: pass
+    class QDialogButtonBox: pass
+    class QSizePolicy: pass
+    class QWidget: pass
+    class QProcessEnvironment: pass
+    class QTimer: pass
+    class QFont: pass
+    class QIcon: pass
+    def pyqtSlot(*args, **kwargs): return lambda func: func # Dummy decorator
+    # Add Qt types if needed
+    class Qt:
+        class Orientation: Horizontal = 0; Vertical = 1
+        class AlignmentFlag: AlignLeft = 0; AlignRight = 0; AlignCenter = 0; AlignVCenter = 0
+        class WindowModality: WindowModal = 0; NonModal = 0
+        class FocusPolicy: NoFocus = 0
+        class ItemDataRole: UserRole = 0; DisplayRole = 0
+        class CheckState: Unchecked = 0; Checked = 0
+        class ContextMenuPolicy: NoContextMenu = 0
+        class LineWrapMode: NoWrap = 0
+        class StandardPixmap: SP_MessageBoxQuestion = 0
+        class DockWidgetArea: LeftDockWidgetArea=0; RightDockWidgetArea=0; BottomDockWidgetArea=0; AllDockWidgetAreas=0
+        class ToolBarArea: TopToolBarArea=0
+    # Define pyqtSignal as dummy if needed
+    if 'pyqtSignal' not in globals():
+         class pyqtSignal:
+              def __init__(self, *args, **kwargs): pass
+              def connect(self, *args, **kwargs): pass
+              def disconnect(self, *args, **kwargs): pass
+              def emit(self, *args, **kwargs): pass
+
 
     logging.warning("PyQt6 not found. ExternalScriptRunnerDialog will not be available.")
-    # You might want to raise an error here if the dialog is critical
-
-
-# --- Project Root Finding ---
-
-# Cache the project root directory
-_project_root: Optional[str] = None
-
-def get_project_root() -> str:
-    """
-    Finds and caches the project root directory.
-
-    Strategies (in order):
-    1. Looks for 'pyproject.toml' or a '.git' directory up to 4 levels up.
-    2. Looks for 'main.py' AND 'config.yaml' up to 4 levels up.
-    3. Falls back based on the script's location (with a warning).
-
-    Returns:
-        str: The absolute path to the determined project root.
-
-    Raises:
-        FileNotFoundError: If the root cannot be reasonably determined after fallback.
-                           (Note: Current implementation falls back instead of raising)
-    """
-    global _project_root
-    if _project_root is not None:
-        return _project_root
-
-    try:
-        # Start from the directory containing this utils.py file
-        # Use abspath to handle different execution contexts
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        # __file__ not defined (e.g., interactive mode) - use current working directory
-        current_dir = os.getcwd()
-        logging.warning("__file__ not defined, using current working directory '%s' as starting point for root search.", current_dir)
-    except Exception as e:
-        logging.error(f"Unexpected error getting initial directory: {e}", exc_info=True)
-        current_dir = os.getcwd() # Fallback to cwd
-        logging.warning("Falling back to current working directory '%s' due to error.", current_dir)
-
-
-    search_dir = current_dir
-    found_root = None
-    max_levels = 4 # Limit search depth
-
-    # --- Strategy 1: Standard Markers ---
-    logging.debug("Searching for project root markers (.git, pyproject.toml) upwards from '%s'", current_dir)
-    for _ in range(max_levels):
-        if os.path.exists(os.path.join(search_dir, 'pyproject.toml')) or \
-           os.path.exists(os.path.join(search_dir, '.git')):
-            found_root = search_dir
-            logging.debug("Found marker in '%s'", found_root)
-            break
-        parent = os.path.dirname(search_dir)
-        if parent == search_dir: # Reached filesystem root
-            logging.debug("Reached filesystem root during marker search.")
-            break
-        search_dir = parent
-
-    # --- Strategy 2: Specific File Combination ---
-    if found_root is None:
-        logging.debug("Searching for main.py + config.yaml upwards from '%s'", current_dir)
-        search_dir = current_dir # Reset search start
-        for _ in range(max_levels):
-            main_py_path = os.path.join(search_dir, 'main.py')
-            config_yaml_path = os.path.join(search_dir, 'config.yaml')
-            if os.path.exists(main_py_path) and os.path.exists(config_yaml_path):
-                found_root = search_dir
-                logging.debug("Found main.py and config.yaml in '%s'", found_root)
-                break
-            parent = os.path.dirname(search_dir)
-            if parent == search_dir: # Reached filesystem root
-                logging.debug("Reached filesystem root during main/config search.")
-                break
-            search_dir = parent
-
-    # --- Strategy 3: Fallback ---
-    if found_root is None:
-        # Last resort fallback: assume this file is one level below root
-        # Adjust this logic if the utils file location is different
-        fallback_root = os.path.dirname(current_dir)
-        logging.warning(
-            "Could not definitively find project root using markers or specific files "
-            "up to %d levels from '%s'. Falling back to parent directory: '%s'",
-            max_levels, current_dir, fallback_root
-        )
-        # Uncomment to make finding the root mandatory:
-        # raise FileNotFoundError(
-        #     f"Could not determine project root from '{current_dir}'. Place a marker file "
-        #     "('pyproject.toml', '.git') or ensure 'main.py'/'config.yaml' "
-        #     "exist in the root, or adjust fallback logic."
-        # )
-        found_root = fallback_root # Use fallback anyway for now
-
-    _project_root = os.path.abspath(found_root) # Store absolute path
-    logging.info("Project root determined as: %s", _project_root)
-    return _project_root
-
-# --- Logging Setup ---
-
-def setup_logging(log_config: Optional[Dict[str, Any]] = None):
-    """
-    Configures root logger with console and rotating file handlers.
-
-    Reads settings from log_config or uses sensible defaults.
-    Removes any previously configured handlers on the root logger.
-
-    Args:
-        log_config (Optional[Dict[str, Any]]): Dictionary usually loaded from
-                                               the 'logging' section of a config file.
-                                               Expected keys (with defaults):
-                                               - log_dir ('logs')
-                                               - log_file_name ('app.log')
-                                               - log_level_console ('INFO')
-                                               - log_level_file ('DEBUG')
-                                               - log_format (see code)
-                                               - log_date_format ('%Y-%m-%d %H:%M:%S')
-                                               - log_max_bytes (5*1024*1024)
-                                               - log_backup_count (4)
-    """
-    if log_config is None:
-        log_config = {}
-
-    # Use basicConfig as a fallback if setup fails critically
-    try:
-        # --- Determine Log Directory and File ---
-        project_root = get_project_root() # Ensure root is found first
-        log_dir_relative = log_config.get('log_dir', 'logs') # Default directory name
-
-        # Defensive check for log_dir_relative type
-        if not isinstance(log_dir_relative, str) or not log_dir_relative:
-             logging.warning("Invalid 'log_dir' in config, using default 'logs'.")
-             log_dir_relative = 'logs'
-
-        log_directory = os.path.join(project_root, log_dir_relative)
-
-        try:
-            os.makedirs(log_directory, exist_ok=True) # Create log directory if it doesn't exist
-        except OSError as e:
-            # Use basic logging since handlers aren't set up yet
-            logging.basicConfig(level=logging.ERROR)
-            logging.error(f"Failed to create log directory '{log_directory}': {e}", exc_info=True)
-            print(f"ERROR: Failed to create log directory '{log_directory}': {e}", file=sys.stderr)
-            # Attempt to fall back to project root? Or just disable file logging?
-            log_directory = project_root
-            logging.warning(f"Falling back to log directory '{log_directory}'")
-            # Or return here to prevent further issues
-
-        log_filename = log_config.get('log_file_name', 'app.log') # Default log file name
-        if not isinstance(log_filename, str) or not log_filename:
-             logging.warning("Invalid 'log_file_name' in config, using default 'app.log'.")
-             log_filename = 'app.log'
-        log_filepath = os.path.join(log_directory, log_filename)
-
-        # --- Get Logging Levels ---
-        console_level_str = str(log_config.get('log_level_console', 'INFO')).upper()
-        file_level_str = str(log_config.get('log_level_file', 'DEBUG')).upper()
-
-        # getattr with default handles invalid level names
-        console_level = getattr(logging, console_level_str, logging.INFO)
-        file_level = getattr(logging, file_level_str, logging.DEBUG)
-        if console_level_str not in logging._nameToLevel:
-            logging.warning(f"Invalid console log level '{console_level_str}', using INFO.")
-        if file_level_str not in logging._nameToLevel:
-            logging.warning(f"Invalid file log level '{file_level_str}', using DEBUG.")
-
-
-        # Root logger level should be the *lowest* of the handler levels to allow all messages through
-        root_level = min(console_level, file_level)
-
-        # --- Get Formatting ---
-        default_format = '%(asctime)s - %(levelname)-8s - [%(name)s:%(funcName)s:%(lineno)d] - %(message)s'
-        log_format_string = log_config.get('log_format', default_format)
-        log_date_format_string = log_config.get('log_date_format', '%Y-%m-%d %H:%M:%S')
-
-        try:
-             log_formatter = logging.Formatter(log_format_string, datefmt=log_date_format_string)
-        except Exception as e_fmt:
-             logging.warning(f"Invalid log format string '{log_format_string}' or date format '{log_date_format_string}'. Using default format. Error: {e_fmt}")
-             log_formatter = logging.Formatter(default_format, datefmt='%Y-%m-%d %H:%M:%S')
-
-
-        # --- Configure Root Logger ---
-        root_logger = logging.getLogger()
-        root_logger.setLevel(root_level)
-
-        # Remove existing handlers to prevent duplicates if setup_logging is called again
-        if root_logger.hasHandlers():
-            logging.log(root_level, "Removing existing logging handlers.") # Use root_level log
-            for handler in root_logger.handlers[:]: # Iterate over a copy
-                try:
-                    handler.close()
-                except Exception as e_close:
-                    # Log at a lower level, might not be critical
-                    logging.warning(f"Error closing handler {handler}: {e_close}")
-                root_logger.removeHandler(handler)
-
-        # --- Create and Add Console Handler ---
-        try:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(console_level)
-            console_handler.setFormatter(log_formatter)
-            root_logger.addHandler(console_handler)
-        except Exception as e_console:
-             # Fallback needed here if console handler fails
-             logging.basicConfig(level=logging.ERROR)
-             logging.error(f"CRITICAL: Failed to set up console logging handler: {e_console}", exc_info=True)
-             print(f"CRITICAL ERROR: Could not setup console logging: {e_console}", file=sys.stderr)
-             # Consider exiting or returning if console logging is essential
-
-        # --- Create and Add File Handler ---
-        file_handler = None
-        try:
-            # Ensure max_bytes and backup_count are integers
-            try:
-                max_bytes = int(log_config.get('log_max_bytes', 5 * 1024 * 1024)) # Default 5MB
-            except (ValueError, TypeError):
-                logging.warning(f"Invalid 'log_max_bytes' value '{log_config.get('log_max_bytes')}', using default 5MB.")
-                max_bytes = 5 * 1024 * 1024
-            if max_bytes <= 0:
-                logging.warning(f"'log_max_bytes' must be positive, using default 5MB.")
-                max_bytes = 5 * 1024 * 1024
-
-            try:
-                backup_count = int(log_config.get('log_backup_count', 4)) # Default 4 backups
-            except (ValueError, TypeError):
-                logging.warning(f"Invalid 'log_backup_count' value '{log_config.get('log_backup_count')}', using default 4.")
-                backup_count = 4
-            if backup_count < 0:
-                 logging.warning(f"'log_backup_count' cannot be negative, using default 4.")
-                 backup_count = 4
-
-            file_handler = RotatingFileHandler(
-                log_filepath,
-                maxBytes=max_bytes,
-                backupCount=backup_count,
-                encoding='utf-8',
-                delay=True # Delay opening file until first log message
-            )
-            file_handler.setLevel(file_level)
-            file_handler.setFormatter(log_formatter)
-            root_logger.addHandler(file_handler)
-            # Log file handler setup details *after* handlers are added
-            logging.debug(
-                f"File logging configured: path='{log_filepath}', level={file_level_str}, "
-                f"max_size={max_bytes} bytes, backups={backup_count}"
-            )
-        except OSError as e_os:
-            logging.error(f"Permission or OS error setting up file logging handler for '{log_filepath}': {e_os}", exc_info=True)
-            print(f"ERROR: OS error setting up file logging to '{log_filepath}': {e_os}", file=sys.stderr)
-        except Exception as e_file:
-            # Log error using the console handler (which should be configured by now)
-            logging.error(f"Failed to set up file logging handler for '{log_filepath}': {e_file}", exc_info=True)
-            # Also print, in case console logging itself is broken
-            print(f"ERROR: Could not setup file logging to '{log_filepath}': {e_file}", file=sys.stderr)
-
-        # Log final status
-        file_status = f"File: {file_level_str} ({'Active' if file_handler else 'Inactive'})"
-        logging.info(f"Logging setup complete. Root Level: {logging.getLevelName(root_level)}, "
-                     f"Console: {console_level_str}, {file_status}")
-
-    except Exception as e_setup:
-        # Catch-all for any unexpected error during setup
-        logging.basicConfig(level=logging.ERROR) # Ensure *some* logging exists
-        logging.exception("CRITICAL ERROR during logging setup: %s", e_setup)
-        print(f"CRITICAL ERROR during logging setup: {e_setup}", file=sys.stderr)
-
-
-# --- Simple Math Utility ---
-
-def ensure_odd(value: Any) -> int:
-    """
-    Converts a value to an integer and ensures it is odd.
-
-    Useful for parameters like filter kernel sizes.
-
-    Args:
-        value (Any): The input value (will be attempted to convert to int).
-
-    Returns:
-        int: An odd integer. Returns 3 if conversion fails or input is None/invalid.
-    """
-    default_odd = 3
-    if value is None:
-        logging.debug("ensure_odd received None, returning default %d.", default_odd)
-        return default_odd
-    try:
-        v_int = int(value)
-        # Check if already odd
-        if v_int % 2 != 0:
-            return v_int
-        else:
-            # Make it odd (handle negative evens correctly too)
-            # Ensure it doesn't become zero if input was 0 or -1
-            new_val = v_int + 1 if v_int >= 0 else v_int - 1
-            # Prevent returning 0 if input was 0 or -1
-            return new_val if new_val != 0 else (1 if v_int == 0 else -1)
-    except (ValueError, TypeError):
-        logging.warning("Could not convert '%s' to int for ensure_odd. Returning default %d.",
-                        value, default_odd, exc_info=True) # Add exc_info
-        return default_odd
 
 
 # --- External Script Runner Dialog ---
@@ -348,226 +81,363 @@ def ensure_odd(value: Any) -> int:
 if _QT_AVAILABLE:
     class ExternalScriptRunnerDialog(QDialog):
         """
-        A dialog to execute external scripts or commands using QProcess.
+        A dialog to execute external scripts or commands using QProcess,
+        displaying stdout and stderr. Handles basic argument parsing and
+        offers optional environment variable configuration.
         """
         def __init__(self, parent: Optional[QWidget] = None):
             super().__init__(parent)
-            self.setWindowTitle("Run External Script")
-            self.setMinimumSize(600, 400)
+            self.setWindowTitle("Run External Script/Command")
+            self.setMinimumSize(650, 450) # Slightly larger default size
 
+            # --- QProcess Setup ---
             self.process = QProcess(self)
+            # Connect signals to appropriate slots
             self.process.readyReadStandardOutput.connect(self._handle_stdout)
             self.process.readyReadStandardError.connect(self._handle_stderr)
             self.process.stateChanged.connect(self._handle_state_change)
-            # finished provides exit code and status
-            self.process.finished.connect(self._handle_finished)
-            # errorOccurred is more detailed for launch failures etc.
-            self.process.errorOccurred.connect(self._handle_error)
+            self.process.finished.connect(self._handle_finished) # Handles exit code/status
+            self.process.errorOccurred.connect(self._handle_error) # Handles launch/process errors
 
+            # --- UI Initialization ---
             self._init_ui()
-            self._update_button_states(QProcess.ProcessState.NotRunning) # Initial state
+            # Set initial button states based on NotRunning state
+            self._update_button_states(QProcess.ProcessState.NotRunning)
 
         def _init_ui(self):
             """Initialize UI elements and layout."""
             layout = QVBoxLayout(self)
 
             # --- Command Input ---
-            form_layout = QHBoxLayout()
-            form_layout.addWidget(QLabel("Command/Script:"))
+            cmd_layout = QHBoxLayout()
+            cmd_layout.addWidget(QLabel("Command/Script:"))
             self.command_input = QLineEdit()
-            self.command_input.setPlaceholderText("Enter command or path to script")
-            form_layout.addWidget(self.command_input)
-
+            self.command_input.setPlaceholderText("Enter command or full path to script/executable")
+            cmd_layout.addWidget(self.command_input)
             self.browse_button = QPushButton("Browse...")
             self.browse_button.setToolTip("Browse for an executable or script")
             self.browse_button.clicked.connect(self._browse_script)
-            form_layout.addWidget(self.browse_button)
-            layout.addLayout(form_layout)
+            cmd_layout.addWidget(self.browse_button)
+            layout.addLayout(cmd_layout)
 
             # --- Arguments Input ---
             args_layout = QHBoxLayout()
             args_layout.addWidget(QLabel("Arguments:"))
             self.args_input = QLineEdit()
-            self.args_input.setPlaceholderText("Enter arguments separated by spaces (or handle quoting)")
+            self.args_input.setPlaceholderText("Enter arguments (use quotes for spaces if needed)")
+            self.args_input.setToolTip("Arguments passed to the command. Use quotes for arguments containing spaces.")
             args_layout.addWidget(self.args_input)
             layout.addLayout(args_layout)
+
+            # --- Optional: Environment Variables (Commented out by default) ---
+            # self.env_button = QPushButton("Environment Variables...")
+            # self.env_button.setCheckable(True)
+            # self.env_button.toggled.connect(self._toggle_env_vars)
+            # args_layout.addWidget(self.env_button) # Add to args layout
+            #
+            # self.env_vars_edit = QTextEdit()
+            # self.env_vars_edit.setPlaceholderText("Enter environment variables (e.g., KEY=VALUE), one per line.")
+            # self.env_vars_edit.setToolTip("Define custom environment variables for the process.\nFormat: VARIABLE_NAME=variable_value\nOne definition per line.")
+            # self.env_vars_edit.setVisible(False) # Initially hidden
+            # self.env_vars_edit.setFixedHeight(80) # Limit height
+            # layout.addWidget(self.env_vars_edit)
+            # --- End Optional Environment Variables ---
 
             # --- Output Area ---
             layout.addWidget(QLabel("Output:"))
             self.output_area = QPlainTextEdit()
             self.output_area.setReadOnly(True)
             self.output_area.setFont(QFont("Courier New", 9)) # Monospaced font
-            self.output_area.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            self.output_area.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap) # Keep lines long
             layout.addWidget(self.output_area)
 
             # --- Status Label ---
             self.status_label = QLabel("Status: Ready")
+            self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             layout.addWidget(self.status_label)
 
             # --- Control Buttons ---
             self.button_box = QDialogButtonBox()
+            # Standard roles for better platform integration
             self.run_button = self.button_box.addButton("Run", QDialogButtonBox.ButtonRole.ActionRole)
             self.stop_button = self.button_box.addButton("Stop", QDialogButtonBox.ButtonRole.ActionRole)
-            self.close_button = self.button_box.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole) # Use RejectRole for standard behavior
+            self.close_button = self.button_box.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole)
+
+            # Set icons if desired (using theme icons as example)
+            self.run_button.setIcon(QIcon.fromTheme("system-run"))
+            self.stop_button.setIcon(QIcon.fromTheme("process-stop"))
+            self.close_button.setIcon(QIcon.fromTheme("window-close"))
 
             self.run_button.clicked.connect(self.start_script)
             self.stop_button.clicked.connect(self.stop_script)
-            self.close_button.clicked.connect(self.reject) # Connect Close to reject
+            self.close_button.clicked.connect(self.reject) # Default reject action closes dialog
 
             layout.addWidget(self.button_box)
             self.setLayout(layout)
 
+        # --- Public Methods to Pre-fill ---
+        def set_command(self, command: str):
+            """Sets the text in the command input field."""
+            self.command_input.setText(command)
+
+        def set_arguments(self, args_str: str):
+            """Sets the text in the arguments input field."""
+            self.args_input.setText(args_str)
+
+        # --- Optional Environment Variable UI ---
+        # @pyqtSlot(bool)
+        # def _toggle_env_vars(self, checked):
+        #     """Shows/hides the environment variable input area."""
+        #     self.env_vars_edit.setVisible(checked)
+
+        # def _get_environment(self) -> Optional[QProcessEnvironment]:
+        #     """Parses environment variables from the text edit."""
+        #     if not self.env_vars_edit.isVisible() or not self.env_vars_edit.toPlainText().strip():
+        #         return None # Use default environment if not visible or empty
+        #
+        #     env = QProcessEnvironment.systemEnvironment() # Start with system env
+        #     text = self.env_vars_edit.toPlainText()
+        #     lines = text.splitlines()
+        #     parse_errors = []
+        #     for i, line in enumerate(lines):
+        #         line = line.strip()
+        #         if not line or line.startswith('#'): # Skip empty/comment lines
+        #             continue
+        #         if '=' not in line:
+        #             parse_errors.append(f"Line {i+1}: Missing '=' separator ('{line}')")
+        #             continue
+        #         key, value = line.split('=', 1)
+        #         key = key.strip()
+        #         value = value.strip() # Keep value as is (user handles quotes if needed)
+        #         if not key:
+        #             parse_errors.append(f"Line {i+1}: Variable name cannot be empty.")
+        #             continue
+        #         logging.debug(f"Setting environment variable: {key}={value}")
+        #         env.insert(key, value)
+        #
+        #     if parse_errors:
+        #          QMessageBox.warning(self, "Environment Variable Error",
+        #                              "Errors parsing environment variables:\n- " + "\n- ".join(parse_errors))
+        #          return None # Indicate error by returning None? Or return partial env? Let's return None.
+        #
+        #     return env
+
+        # --- Internal Slots and Helpers ---
+
         @pyqtSlot()
         def _browse_script(self):
             """Open a file dialog to select a script/executable."""
-            # Consider adding filters for specific script types if desired
-            file_path, _ = QFileDialog.getOpenFileName(self, "Select Script or Executable", "", "All Files (*);;Python Scripts (*.py);;Batch Files (*.bat *.cmd);;Shell Scripts (*.sh)")
+            # Use user's home directory or last used directory as starting point
+            start_dir = getattr(self, '_last_browse_dir', str(Path.home()))
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "Select Script or Executable", start_dir,
+                "All Files (*);;Python Scripts (*.py);;Batch Files (*.bat *.cmd);;Shell Scripts (*.sh)"
+            )
             if file_path:
                 self.command_input.setText(file_path)
+                self._last_browse_dir = os.path.dirname(file_path) # Remember directory
 
         @pyqtSlot()
         def start_script(self):
-            """Starts the external process."""
+            """Starts the external process using QProcess."""
+            if self.process.state() != QProcess.ProcessState.NotRunning:
+                 logging.warning("Start script requested, but process is already running or starting.")
+                 return
+
             command = self.command_input.text().strip()
             if not command:
-                QMessageBox.warning(self, "Input Error", "Please enter a command or script path.")
+                QMessageBox.warning(self, "Input Error", "Please enter a command or select a script path.")
                 return
 
             args_str = self.args_input.text().strip()
-            # Basic argument splitting - consider using shlex for more robust parsing if needed
-            arguments = args_str.split() if args_str else []
-
-            self.output_area.clear()
-            self.status_label.setText("Status: Starting...")
-            logging.info(f"Attempting to run command: '{command}' with args: {arguments}")
-
-            # QProcess handles quoting issues better if you pass arguments as a list
-            # For simple commands entered directly, startDetached might be simpler,
-            # but start() with list arguments is generally more robust.
-            # If command is a python script, you might need to prepend 'python' or sys.executable
-            if command.lower().endswith(".py") and not command.startswith("python"):
-                 # Make sure to use the correct python executable if venvs are involved
-                 executable = sys.executable # Use the same python that runs the app
-                 logging.info(f"Prepending Python executable: {executable}")
-                 arguments.insert(0, command) # Script path becomes the first argument
-                 command = executable
-
+            arguments: List[str] = []
             try:
-                self.process.start(command, arguments)
-                # State change will be handled by _handle_state_change and _handle_error
-            except Exception as e:
-                # This catch might be redundant if QProcess.errorOccurred handles it
-                error_msg = f"Failed to initiate process start: {e}"
-                logging.error(error_msg, exc_info=True)
-                self.output_area.appendPlainText(f"ERROR: {error_msg}\n")
-                self.status_label.setText("Status: Error")
-                self._update_button_states(QProcess.ProcessState.NotRunning)
+                # Use shlex for robust splitting, respecting quotes
+                # Use posix=False on Windows to handle backslashes in paths correctly
+                arguments = shlex.split(args_str, posix=(os.name != 'nt'))
+            except ValueError as e_shlex:
+                 QMessageBox.warning(self, "Argument Error", f"Could not parse arguments (check quoting):\n{e_shlex}")
+                 return
 
+            self.output_area.clear() # Clear previous output
+            self.status_label.setText("Status: Starting...")
+            self._update_button_states(QProcess.ProcessState.Starting) # Update buttons immediately
+            QApplication.processEvents() # Ensure UI updates
+
+            program = command
+            program_args = arguments
+
+            # --- Handle Python Scripts ---
+            # If command ends with .py and isn't explicitly 'python' or 'python3', prepend sys.executable
+            if command.lower().endswith(".py") and not os.path.basename(command).lower().startswith("python"):
+                 executable = sys.executable # Use the same python interpreter that runs the GUI app
+                 logging.info(f"Prepending Python executable ('{executable}') to run script: '{command}'")
+                 program_args.insert(0, program) # Script path becomes the first argument
+                 program = executable # Executable is now python
+
+            logging.info(f"Running command: '{program}' with arguments: {program_args}")
+
+            # --- Get Optional Environment --- (Uncomment if using Env Vars UI)
+            # process_environment = self._get_environment()
+            # if process_environment is None and self.env_vars_edit.isVisible():
+            #      # Error occurred parsing environment variables, stop execution
+            #      self.status_label.setText("Status: Error (Environment)")
+            #      self._update_button_states(QProcess.ProcessState.NotRunning)
+            #      return
+            # elif process_environment:
+            #      logging.debug("Setting custom process environment.")
+            #      self.process.setProcessEnvironment(process_environment)
+            # else:
+            #      # Use default environment if not set or UI hidden
+            #      self.process.setProcessEnvironment(QProcessEnvironment()) # Ensure reset if previously set
+            # --- End Optional Environment ---
+
+            # --- Start Process ---
+            # QProcess.start handles path finding and quoting for arguments list
+            self.process.start(program, program_args)
+            # Process state change signals (_handle_state_change, _handle_error) will indicate success/failure to start
 
         @pyqtSlot()
         def stop_script(self):
-            """Stops the running process."""
+            """Stops the running process gracefully, then forcefully if necessary."""
             if self.process.state() == QProcess.ProcessState.Running:
                 self.status_label.setText("Status: Attempting to stop...")
-                logging.info("Attempting to terminate process.")
+                logging.info("Attempting to terminate process...")
                 self.process.terminate() # Ask nicely first
 
-                # Optionally, add a timer to forcefully kill if terminate doesn't work quickly
-                # QTimer.singleShot(3000, self._force_kill)
+                # Set a short timer to check if termination worked, otherwise kill
+                QTimer.singleShot(2000, self._force_kill_if_running) # Wait 2 seconds
             else:
-                logging.warning("Stop clicked but process is not running.")
+                logging.debug("Stop clicked but process is not running.")
 
-        # def _force_kill(self):
-        #     if self.process.state() == QProcess.ProcessState.Running:
-        #         logging.warning("Process did not terminate, killing forcefully.")
-        #         self.process.kill()
+        def _force_kill_if_running(self):
+            """Checks if the process is still running after terminate and kills it."""
+            if self.process.state() == QProcess.ProcessState.Running:
+                logging.warning("Process did not terminate after 2 seconds, killing forcefully.")
+                self.process.kill()
 
+
+        def _decode_output(self, byte_data: bytes) -> str:
+            """Decodes byte data from process output using best-effort strategy."""
+            try:
+                # 1. Try UTF-8 first (most common)
+                return byte_data.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    # 2. Try system's preferred encoding
+                    pref_enc = locale.getpreferredencoding(False)
+                    if pref_enc and pref_enc.lower() != 'utf-8': # Avoid trying utf-8 again
+                         logging.debug(f"Decoding output with system preferred encoding: {pref_enc}")
+                         return byte_data.decode(pref_enc)
+                    else:
+                         raise # Re-raise if preferred is utf-8 or None
+                except Exception:
+                    try:
+                        # 3. Fallback to UTF-8 with replacement characters
+                        logging.warning("Could not decode output with UTF-8 or system encoding. Using replacement characters.")
+                        return byte_data.decode('utf-8', errors='replace')
+                    except Exception as e:
+                        # 4. Absolute fallback: Representation
+                        logging.error(f"Could not decode output bytes at all: {e}")
+                        return repr(byte_data)
 
         @pyqtSlot()
         def _handle_stdout(self):
-            """Append standard output to the text area."""
-            data = self.process.readAllStandardOutput()
-            try:
-                # Try decoding using UTF-8, fallback to locale encoding or lossy
-                text = bytes(data).decode('utf-8', errors='replace')
-            except Exception as e:
-                logging.warning(f"Error decoding stdout: {e}")
-                text = repr(bytes(data)) # Show raw representation on error
-            self.output_area.appendPlainText(text)
-            self.output_area.verticalScrollBar().setValue(self.output_area.verticalScrollBar().maximum())
-
+            """Append standard output to the text area, handling decoding."""
+            if self.process:
+                 byte_data = bytes(self.process.readAllStandardOutput())
+                 text = self._decode_output(byte_data)
+                 self.output_area.appendPlainText(text)
+                 self.output_area.verticalScrollBar().setValue(self.output_area.verticalScrollBar().maximum())
 
         @pyqtSlot()
         def _handle_stderr(self):
-            """Append standard error to the text area."""
-            data = self.process.readAllStandardError()
-            try:
-                text = bytes(data).decode('utf-8', errors='replace')
-            except Exception as e:
-                 logging.warning(f"Error decoding stderr: {e}")
-                 text = repr(bytes(data))
-            # Optionally, format stderr differently (e.g., color)
-            self.output_area.appendPlainText(f"[STDERR] {text}")
-            self.output_area.verticalScrollBar().setValue(self.output_area.verticalScrollBar().maximum())
-
+            """Append standard error to the text area, handling decoding."""
+            if self.process:
+                 byte_data = bytes(self.process.readAllStandardError())
+                 text = self._decode_output(byte_data)
+                 # Optionally, format stderr differently (e.g., color, prefix)
+                 self.output_area.appendPlainText(f"[STDERR] {text}")
+                 self.output_area.verticalScrollBar().setValue(self.output_area.verticalScrollBar().maximum())
 
         @pyqtSlot(QProcess.ProcessState)
         def _handle_state_change(self, state: QProcess.ProcessState):
             """Update UI elements based on process state changes."""
             logging.debug(f"Process state changed to: {state}")
-            self._update_button_states(state)
+            self._update_button_states(state) # Update button enables based on state
+            # Update status label based on state
             if state == QProcess.ProcessState.NotRunning:
-                # Status might be set more accurately by finished/error handlers
-                if "stopping" not in self.status_label.text().lower() and \
-                   "error" not in self.status_label.text().lower() and \
-                   "finished" not in self.status_label.text().lower():
-                    self.status_label.setText("Status: Ready")
+                # Let _handle_finished or _handle_error set the final status
+                pass
             elif state == QProcess.ProcessState.Starting:
                 self.status_label.setText("Status: Starting...")
             elif state == QProcess.ProcessState.Running:
                 self.status_label.setText("Status: Running...")
 
-
         @pyqtSlot(int, QProcess.ExitStatus)
         def _handle_finished(self, exit_code: int, exit_status: QProcess.ExitStatus):
-            """Handle process completion."""
+            """Handle process completion (normal exit or crash)."""
             status_text = "normally" if exit_status == QProcess.ExitStatus.NormalExit else "with crash"
-            logging.info(f"Process finished {status_text}. Exit code: {exit_code}")
-            self.output_area.appendPlainText(f"\n--- Process finished ({status_text}, Exit Code: {exit_code}) ---\n")
-            self.status_label.setText(f"Status: Finished (Exit Code: {exit_code})")
-            # State should automatically transition to NotRunning, triggering button updates
+            log_msg = f"Process finished {status_text}. Exit code: {exit_code}"
+            logging.info(log_msg)
+            self.output_area.appendPlainText(f"\n--- {log_msg} ---\n")
+            self.status_label.setText(f"Status: Finished (Code: {exit_code})")
+            # State should transition to NotRunning, which triggers button update via _handle_state_change
 
 
         @pyqtSlot(QProcess.ProcessError)
         def _handle_error(self, error: QProcess.ProcessError):
-            """Handle errors reported by QProcess."""
-            error_string = self.process.errorString() # Get descriptive error
+            """Handle errors reported by QProcess (e.g., failed to start, crashed)."""
+            # These errors often occur *before* or *during* process start, or if it crashes.
+            error_string = self.process.errorString() # Get descriptive error message
             logging.error(f"QProcess Error Occurred: {error} - {error_string}")
             self.output_area.appendPlainText(f"\n--- PROCESS ERROR: {error_string} ({error}) ---\n")
-            self.status_label.setText(f"Status: Error ({error})")
-            # State should automatically transition to NotRunning, triggering button updates
-
+            self.status_label.setText(f"Status: Error ({error_string})")
+            # State usually transitions to NotRunning after error, triggering button update
 
         def _update_button_states(self, state: QProcess.ProcessState):
             """Enable/disable buttons based on process state."""
-            is_running = (state == QProcess.ProcessState.Running or state == QProcess.ProcessState.Starting)
-            self.run_button.setEnabled(not is_running)
-            self.stop_button.setEnabled(is_running)
-            self.command_input.setEnabled(not is_running)
-            self.args_input.setEnabled(not is_running)
-            self.browse_button.setEnabled(not is_running)
+            is_running_or_starting = (state == QProcess.ProcessState.Running or state == QProcess.ProcessState.Starting)
+            self.run_button.setEnabled(not is_running_or_starting)
+            self.stop_button.setEnabled(is_running_or_starting)
+            # Disable input fields while running
+            self.command_input.setEnabled(not is_running_or_starting)
+            self.args_input.setEnabled(not is_running_or_starting)
+            self.browse_button.setEnabled(not is_running_or_starting)
+            # self.env_button.setEnabled(not is_running_or_starting) # Uncomment if using env vars UI
 
         def closeEvent(self, event):
-            """Ensure the process is stopped when the dialog closes."""
-            if self.process.state() != QProcess.ProcessState.NotRunning:
-                logging.info("Dialog closing, stopping running process.")
-                self.stop_script()
-                # Optionally wait briefly for termination before accepting close
-                # self.process.waitForFinished(500) # Wait max 500ms
-            super().closeEvent(event)
+            """Ensure the process is stopped and cleaned up when the dialog closes."""
+            logging.debug("ExternalScriptRunnerDialog close event.")
+            if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
+                logging.info("Dialog closing with process running. Attempting termination.")
+                self.stop_script() # Ask nicely first
+                # Wait a short time for process to finish after terminate/kill attempt
+                if not self.process.waitForFinished(500): # Wait max 500ms
+                    logging.warning("Process did not finish within 500ms of close event. May be orphaned.")
+                    # Consider self.process.kill() here again if essential
+
+            # Disconnect signals to prevent further handling after close
+            if self.process:
+                try: self.process.readyReadStandardOutput.disconnect(self._handle_stdout)
+                except TypeError: pass
+                try: self.process.readyReadStandardError.disconnect(self._handle_stderr)
+                except TypeError: pass
+                try: self.process.stateChanged.disconnect(self._handle_state_change)
+                except TypeError: pass
+                try: self.process.finished.disconnect(self._handle_finished)
+                except TypeError: pass
+                try: self.process.errorOccurred.disconnect(self._handle_error)
+                except TypeError: pass
+
+                # Schedule the QProcess object for deletion later by the event loop
+                self.process.deleteLater()
+                self.process = None # Clear reference
+
+            super().closeEvent(event) # Accept the close event
 
 else:
-    # If Qt not available, provide a dummy class or raise error on instantiation
+    # If Qt not available, provide a dummy class that raises error on instantiation
     class ExternalScriptRunnerDialog:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("Cannot create ExternalScriptRunnerDialog: PyQt6 is not installed or available.")
@@ -575,26 +445,12 @@ else:
 
 # --- Standalone Test ---
 if __name__ == "__main__":
-    # Basic logging setup for testing utils
-    setup_logging({
-        'log_level_console': 'DEBUG',
-        'log_level_file': 'DEBUG'
-    })
+    # Basic logging setup for testing this module
+    log_level = logging.DEBUG # Use DEBUG for testing
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)-7s - [%(name)s:%(lineno)d] - %(message)s', datefmt='%H:%M:%S')
+    logging.getLogger().name = 'ExternalScriptRunnerTest'
 
-    logging.info("--- Testing Utility Functions ---")
-    # Test ensure_odd
-    print(f"ensure_odd(4) -> {ensure_odd(4)}")
-    print(f"ensure_odd(5) -> {ensure_odd(5)}")
-    print(f"ensure_odd(0) -> {ensure_odd(0)}")
-    print(f"ensure_odd(-1) -> {ensure_odd(-1)}")
-    print(f"ensure_odd(-2) -> {ensure_odd(-2)}")
-    print(f"ensure_odd(None) -> {ensure_odd(None)}")
-    print(f"ensure_odd('abc') -> {ensure_odd('abc')}")
-    print(f"ensure_odd(4.6) -> {ensure_odd(4.6)}")
-
-    # Test project root finding
-    root = get_project_root()
-    print(f"Project Root Found: {root}")
+    logging.info("--- Testing External Script Runner Dialog ---")
 
     # Test Dialog (only if Qt is available)
     if _QT_AVAILABLE:
@@ -602,22 +458,32 @@ if __name__ == "__main__":
         dialog = ExternalScriptRunnerDialog()
 
         # --- Example Commands to Test ---
-        # Windows:
-        # dialog.command_input.setText("ping")
-        # dialog.args_input.setText("localhost -n 3")
-        # dialog.command_input.setText("cmd") # Interactive might behave oddly
-        # dialog.args_input.setText("/c dir") # Run dir and exit
+        if os.name == 'nt': # Windows examples
+             # dialog.set_command("ping")
+             # dialog.set_arguments("localhost -n 3")
+             dialog.set_command("cmd")
+             dialog.set_arguments("/c \"echo Hello from CMD & timeout /t 3 /nobreak > NUL & echo CMD Finished\"") # Command with spaces/quotes
+             # dialog.set_command("C:\\Windows\\System32\\notepad.exe") # Path with spaces
+             # dialog.set_arguments("\"C:\\Users\\Public\\Documents\\test file with spaces.txt\"") # Argument with spaces
+        else: # Linux/macOS examples
+             # dialog.set_command("ping")
+             # dialog.set_arguments("localhost -c 3")
+             dialog.set_command("bash")
+             dialog.set_arguments("-c 'echo Hello from Bash; sleep 3; echo Bash Finished'")
+             # dialog.set_command("ls")
+             # dialog.set_arguments("-lha \"/tmp\"") # Example with quoted path arg
 
-        # Linux/macOS:
-        # dialog.command_input.setText("ping")
-        # dialog.args_input.setText("localhost -c 3")
-        # dialog.command_input.setText("ls")
-        # dialog.args_input.setText("-lha")
-
-        # Python script (assuming python is in PATH):
-        # Create a dummy test.py: print("Hello from Python Script!"); import time; time.sleep(2); print("Script finished.")
-        # dialog.command_input.setText("test.py") # Will prepend sys.executable
-        # dialog.args_input.setText("arg1 arg2")
+        # Example Python script (create dummy script first if needed)
+        # test_py_path = Path("./dummy_test_script.py")
+        # if not test_py_path.exists():
+        #     with open(test_py_path, "w") as f:
+        #         f.write('import sys, time\n')
+        #         f.write('print(f"Hello from Python Script! Args: {sys.argv[1:]}")\n')
+        #         f.write('print("Sleeping...", file=sys.stderr)\n')
+        #         f.write('time.sleep(4)\n')
+        #         f.write('print("Python Script finished.")\n')
+        # dialog.set_command(str(test_py_path.resolve()))
+        # dialog.set_arguments("'Argument with space' second_arg 123") # Test shlex parsing
 
         dialog.show()
         sys.exit(app.exec())
@@ -627,7 +493,4 @@ if __name__ == "__main__":
         try:
             ExternalScriptRunnerDialog()
         except RuntimeError as e:
-            print(f"Correctly caught expected error: {e}")
-
-
-# --- END OF REVISED external_script_runner.py ---
+            print(f"Correctly caught expected error on instantiation: {e}")

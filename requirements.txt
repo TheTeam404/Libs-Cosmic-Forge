@@ -1,22 +1,26 @@
 # Core Libraries
-numpy>=1.21
-scipy>=1.8
-pandas>=1.4
-pyyaml>=6.0
-PyWavelets>=1.3 # Added for wavelet denoising
+numpy>=1.21,<2.0           # Array handling. Upper bound added for stability.
+scipy>=1.8,<2.0            # Scientific computing (signal processing, optimize). Upper bound added.
+pandas>=1.4,<2.0           # Data structures and analysis (DataFrames). Upper bound added.
+pyyaml>=6.0,<7.0           # Configuration file parsing.
+PyWavelets>=1.3,<1.6       # Wavelet transforms for denoising. Upper bound added.
 
 # GUI
-PyQt6>=6.4
-matplotlib>=3.5
+PyQt6>=6.4,<6.8            # GUI framework. Upper bound added for stability.
+matplotlib>=3.5,<3.9       # Plotting library. Upper bound added.
 
 # Data Handling & NIST
-astroquery>=0.4.6 # For fetching NIST data online
-astropy>=5.0     # Dependency for astroquery
+# Pin astroquery minor version due to potential API/column changes (Issue 5.1)
+astroquery>=0.4.6,<0.5
+astropy>=5.0,<6.1          # Dependency for astroquery. Upper bound added.
 
 # Machine Learning (Optional but used in ML view)
-scikit-learn>=1.1
+# Ensure scikit-learn version is compatible if strict reproducibility needed
+scikit-learn>=1.1,<1.5     # Machine learning algorithms. Upper bound added.
 
-# Add other specific libraries if needed later
-# e.g., lmfit (for advanced fitting)
-# e.g., uncertainties (for error propagation)
-# e.g., pyqtgraph (alternative plotter)
+# Note on Versioning:
+# Using minimum versions (>=) allows users to get newer bug fixes.
+# Adding upper bounds (<) prevents automatic upgrades to major new versions
+# which might introduce breaking changes. Adjust bounds based on testing
+# and compatibility requirements. For strict reproducibility, pin exact
+# versions (e.g., numpy==1.23.5).
