@@ -1,102 +1,117 @@
 # Configuration for LIBS Cosmic Forge
 
 # --- Appearance ---
-default_theme: 'dark_cosmic' # Options: 'dark_cosmic', 'light_science'
-
-plotting:
-  matplotlib_style_dark: 'dark_background'
-  matplotlib_style_light: 'seaborn-v0_8-notebook'
-  # Custom colors (override theme defaults if needed)
-  raw_data_color: 'gray'
-  processed_data_color: 'cyan'
-  baseline_color: 'orange'
-  peak_detected_color: 'red'
-  peak_fitted_color: 'lime' # Edge color for fitted marker
-  fit_line_color: 'magenta' # Default fit line
-  highlight_fit_color: 'yellow' # Highlighted fit line/marker
-  highlight_peak_color: 'yellow' # Highlighted peak selection marker
-  nist_line_colormap: 'tab10' # Colormap for NIST ID lines by element
+appearance:
+  default_theme: 'dark_cosmic'   # Options: 'dark_cosmic', 'light_science' (requires corresponding .qss file)
+  plotting:
+    matplotlib_style_dark: 'dark_background'
+    matplotlib_style_light: 'seaborn-v0_8-notebook'
+    # Colors below override theme defaults if needed, otherwise can be commented out or removed.
+    # raw_data_color: 'gray'
+    # processed_data_color: 'cyan'
+    # baseline_color: 'orange'
+    # peak_detected_color: 'red'
+    # peak_fitted_color: 'lime' # Edge color for fitted marker
+    # fit_line_color: 'magenta' # Default fit line
+    # highlight_fit_color: 'yellow' # Highlighted fit line/marker
+    # highlight_peak_color: 'yellow' # Highlighted peak selection marker
+    nist_line_colormap: 'tab10' # Colormap for NIST ID lines by element (e.g., 'tab10', 'viridis', 'plasma')
 
 # --- Processing Defaults ---
 processing:
   baseline:
-    default_method: 'Polynomial' # Options: 'Polynomial', 'SNIP', 'None'
-    poly_order: 3
-    snip_iterations: 100 # Placeholder
-    percentile: 10.0
+    default_method: 'Polynomial'       # Options: 'Polynomial', 'SNIP', 'None'
+    poly_order: 3                      # Default order for Polynomial baseline (integer >= 0)
+    snip_iterations: 100               # Default iterations for SNIP baseline (integer >= 1)
+    percentile: 10.0                   # Percentile for threshold in Polynomial baseline (0 < percentile <= 100)
+    max_iterations: 10                 # Max iterations for iterative Polynomial refinement (integer >= 1)
+    tolerance: 0.001                   # Convergence tolerance for iterative Polynomial
   smoothing:
-    default_method: 'SavitzkyGolay' # Options: 'SavitzkyGolay', 'None'
-    savitzky_golay: { window_length: 11, polyorder: 3 }
-  denoising: # <-- NEW SECTION ADDED
-    default_method: 'Wavelet' # Options: 'Wavelet', 'None'
+    default_method: 'SavitzkyGolay'    # Options: 'SavitzkyGolay', 'None'
+    savitzky_golay:
+      window_length: 11                # Default window length (odd integer >= 3, < data points)
+      polyorder: 3                     # Default polynomial order (integer >= 0, < window_length)
+  denoising:
+    default_method: 'Wavelet'          # Options: 'Wavelet', 'None'
     wavelet:
-      wavelet_type: 'db8'   # Default Daubechies wavelet (e.g., 'db4', 'db8', 'sym8', 'coif5')
-      level: 4              # Default decomposition level (adjust based on signal length/noise)
-      mode: 'soft'          # Thresholding mode ('soft' or 'hard')
-      threshold_sigma_factor: 3.0 # Factor times Median Absolute Deviation for threshold
-  noise_analysis: {} # Placeholder
+      wavelet_type: 'db8'              # Default Daubechies wavelet (e.g., 'db4', 'sym8', 'coif5')
+      level: 4                         # Default decomposition level (integer >= 1, auto-adjusts if too high)
+      mode: 'soft'                     # Thresholding mode ('soft' or 'hard')
+      threshold_sigma_factor: 3.0      # Factor times Median Absolute Deviation (MAD) for threshold (float > 0)
+  noise_analysis: {} # Placeholder for future noise analysis settings
 
 # --- Peak Detection Defaults ---
 peak_detection:
-  default_method: 'ScipyFindPeaks' # Only ScipyFindPeaks currently implemented
+  default_method: 'ScipyFindPeaks'     # Only ScipyFindPeaks currently implemented
   scipy_find_peaks:
-    relative_height_percent: 5.0
-    min_distance_points: 5
-    width: 0
-    prominence: 0.0
+    relative_height_percent: 5.0       # Min peak height relative to intensity range (0 < height <= 100)
+    min_distance_points: 5             # Min horizontal distance between peaks (integer >= 1)
+    width_points: 0                    # Min peak width in points (integer >= 0, 0=disabled)
+    prominence: 0.0                    # Min peak prominence (float >= 0, 0=disabled)
 
 # --- Peak Fitting Defaults ---
 peak_fitting:
-  # profiles_to_fit: ['Gaussian', 'Lorentzian', 'PseudoVoigt'] # Currently hardcoded in fitter
-  roi_factor: 7.0 # Default ROI width = Factor * Est. FWHM
-  min_roi_width_nm: 0.1 # Minimum default ROI width
-  max_iterations: 2000 # Max iterations for scipy.optimize.curve_fit
-  model_selection: 'AIC' # Options: 'AIC', 'BIC'
-  baseline_mode: 'LocalLinear' # Local baseline for fit ROI: 'LocalLinear', 'Slope', 'None'
+  profiles_to_fit: ['Gaussian', 'Lorentzian', 'PseudoVoigt'] # Profiles attempted during fitting (matches ProfileType enum)
+  roi_factor: 7.0                      # Default auto ROI width = Factor * Estimated FWHM (float > 0)
+  min_roi_width_nm: 0.1                # Minimum width for auto ROI (nm, float > 0)
+  min_roi_points: 5                    # Minimum number of data points required in ROI (integer >= 3)
+  max_iterations: 2000                 # Max iterations for scipy.optimize.curve_fit (integer >= 1)
+  model_selection: 'AIC'               # Criterion for best fit selection. Options: 'AIC', 'BIC'
+  baseline_mode: 'LocalLinear'         # Local baseline in fit ROI. Options: 'LocalLinear', 'Slope', 'None'
 
-# --- NIST Search ---
-database: # Section kept for NIST online settings
-  online_search_timeout_s: 15
-  online_query_delay_s: 1.5
-  default_search_tolerance_nm: 0.1 # Default tolerance for NIST search UI panel
+# --- Atomic Data Files ---
+# Paths relative to the project root directory.
+atomic_data:
+  partition_function_file: 'database/atomic_data/partition_functions.csv'
+  ionization_energy_file: 'database/atomic_data/ionization_energies.csv'
+
+# --- NIST Online Search ---
+nist_online_search:
+  timeout_s: 20                        # Timeout for online queries (seconds, integer > 0)
+  query_delay_s: 1.5                   # Delay before each query to NIST server (seconds, float >= 0)
+  default_search_tolerance_nm: 0.1     # Default tolerance for NIST search UI panel (nm, float > 0)
 
 # --- CF-LIBS ---
 cflibs:
-  min_lines_for_boltzmann: 3 # Minimum required lines for Boltzmann plot calculation
-  # default_temp_species: 'Fe I' # If needed later
+  min_lines_for_boltzmann: 3           # Minimum required lines for valid Boltzmann plot calculation (integer >= 2)
+  # Add other CF-LIBS specific defaults here if needed
 
 # --- Machine Learning ---
 machine_learning:
   # Preprocessing defaults for ML View
-  preprocess_baseline_method: 'Polynomial (Linear)' # Limited options for speed? Use 'None' to disable.
-  preprocess_scale_default: true
+  preprocess_baseline_method: 'Polynomial' # Baseline method for ML preprocessing. Options: 'Polynomial', 'None' (Will use order=1)
+  preprocess_scale_default: true           # Apply StandardScaler by default? (boolean)
   # Default parameters for specific algorithms
-  pca: { default_n_components: 3 }
-  pls: { default_n_components: 5, default_target_wl: 404.58 }
-  RandomForest: { n_estimators: 100 } # Example
-  GBT: { n_estimators: 100, learning_rate: 0.1 } # Example
+  pca:
+    default_n_components: 3            # Default number of Principal Components (integer >= 1)
+  pls:
+    default_n_components: 5            # Default number of PLS Components (integer >= 1)
+    default_target_wl: 404.58          # Example target wavelength for PLS Regression (nm, float)
+  RandomForest:                        # Example parameters
+    n_estimators: 100
+  GBT:                                 # Example parameters
+    n_estimators: 100
+    learning_rate: 0.1
 
 # --- File IO ---
 file_io:
-  default_delimiter: '\t'
-  default_comment_char: '#'
-  # Default float format for saving CSVs
-  default_float_format: '%.5g' # General format with up to 5 significant digits
-  # remember_last_directory: true # QSettings handles this automatically now
+  default_delimiter: '\t'              # Default delimiter for loading files (if guessing fails). '\t', ',', ';', r'\s+' are common.
+  default_comment_char: '#'            # Default comment character for loading files. Use '' or null for none.
+  default_float_format: '%.6g'         # Default float format for saving CSVs (e.g., '%.6g', '%.4f', '%.3e')
 
 # --- Logging ---
 logging:
-  log_level_console: 'INFO' # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  log_level_file: 'DEBUG'
-  log_dir: 'logs' # Relative to project root
-  log_file_name: 'libs_cosmic_forge.log'
-  log_max_bytes: 5242880 # 5 MB
-  log_backup_count: 4
+  log_level_console: 'INFO'            # Console level. Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+  log_level_file: 'DEBUG'              # File level. Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+  log_dir: 'logs'                      # Log directory relative to project root
+  log_file_name: 'libs_cosmic_forge.log' # Log filename
+  log_max_bytes: 5242880               # Max log file size in bytes (e.g., 5 * 1024 * 1024 = 5MB)
+  log_backup_count: 4                  # Number of backup log files to keep (integer >= 0)
   # Optional format override:
-  # log_format: '%(asctime)s - %(levelname)-7s - [%(name)s:%(lineno)d] - %(message)s'
+  # log_format: '%(asctime)s - %(levelname)-8s - [%(name)s:%(lineno)d] - %(message)s'
   # log_date_format: '%Y-%m-%d %H:%M:%S'
 
 # --- Application Settings ---
 application:
-  remember_window_state: true # Save/restore window geometry and dock layout via QSettings
+  remember_window_state: true          # Save/restore window geometry and dock layout via QSettings (boolean)
   # Add other application-wide settings here if needed
