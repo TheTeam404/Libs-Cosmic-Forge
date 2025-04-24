@@ -1,40 +1,39 @@
-
+# -*- coding: utf-8 -*-
 """
 Module for handling complex atomic data retrieval and calculation,
 such as Partition Functions and Ionization Energies.
 
-Loads data from CSV files if available, otherwise uses limited defaults.
+Loads data from user-specified CSV files (paths typically provided via config),
+otherwise falls back to limited hardcoded defaults for ionization energies.
 Provides functions to retrieve data, handling interpolation for partition functions.
 
 IMPORTANT: The accuracy of CF-LIBS calculations heavily depends on the quality
-           and completeness of the data in partition_functions.csv and
-           ionization_energies.csv. Users should generate these files from
+           and completeness of the data in the specified partition function and
+           ionization energy CSV files. Users MUST generate these files from
            reliable sources (e.g., NIST ASD website levels data, literature)
            using the provided placeholder builder script (`database/atomic_data_builder.py`)
-           as a template, or by obtaining pre-compiled files.
+           as a template, ensuring the format matches requirements (see builder script).
 """
 
 import logging
 import os
-import sqlite3
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict, List, Tuple, Any # Added Any
-
-# Import helpers if needed later
-from utils.helpers import get_project_root
+from typing import Optional, Dict, List, Tuple, Any
 
 # --- Constants ---
-ATOMIC_DATA_DIR = os.path.join(get_project_root(), "database", "atomic_data")
-PARTITION_FUNC_FILE = os.path.join(ATOMIC_DATA_DIR, "partition_functions.csv")
-IONIZATION_ENERGY_FILE = os.path.join(ATOMIC_DATA_DIR, "ionization_energies.csv")
+# Path constants removed - file paths should be passed in during loading
 
 # --- Data Caches ---
-_partition_function_cache: Dict[str, Any] = {"loaded": None} # Status: None, True, False
+# Store data keyed by normalized species string (e.g., "Fe I")
+# Cache status: None (not attempted), True (load successful), False (load failed/file missing)
+_partition_function_cache: Dict[str, Any] = {"loaded": None}
 _ionization_energy_cache: Dict[str, Any] = {"loaded": None}
 
 # --- Default/Fallback Data ---
-DEFAULT_IONIZATION_ENERGIES = { # Used if file loading fails
+# Limited set of default V_ion (eV) used ONLY if ionization_energies.csv is missing/fails to load.
+# Keys MUST be normalized (e.g., "Fe I", not "fe i").
+DEFAULT_IONIZATION_ENERGIES = {
     'H I': 13.59844, 'He I': 24.58739, 'Li I': 5.39172, 'Be I': 9.3227, 'B I': 8.29803,
     'C I': 11.2603, 'N I': 14.53414, 'O I': 13.61806, 'F I': 17.42282, 'Ne I': 21.56454,
     'Na I': 5.13908, 'Mg I': 7.64624, 'Al I': 5.98577, 'Si I': 8.15169, 'P I': 10.48669,
@@ -44,93 +43,341 @@ DEFAULT_IONIZATION_ENERGIES = { # Used if file loading fails
     'Ni I': 7.6398, 'Ni II': 18.16884, 'Cr I': 6.7665, 'Cr II': 16.4857,
     'Cu I': 7.72638, 'Cu II': 20.2924, 'Zn I': 9.3942, 'Zn II': 17.9644,
     'Sr I': 5.6949, 'Sr II': 11.03013, 'Ba I': 5.2117, 'Ba II': 10.00383,
-    # Add more if needed for common fallback scenarios
+    # Add more common elements if desired for improved fallback coverage
 }
 
+# --- Helper Functions ---
 
-# --- Partition Function Handling ---
+def _normalize_species_key(species: str) -> Optional[str]:
+    """Normalizes a species string to 'Elem Ion' format (e.g., "fe i" -> "Fe I")."""
+    if not isinstance(species, str): return None
+    parts = species.strip().split()
+    if len(parts) != 2: return None # Expect "Element Ion"
+    element, ion_state = parts[0], parts[1]
+    # Basic validation: element is alphabetic, ion_state is Roman numeral (or maybe integer later?)
+    if not element.isalpha() or not ion_state: return None
+    # Normalize: Capitalize element, uppercase Roman numeral ion state
+    return f"{element.capitalize()} {ion_state.upper()}"
+
 def _find_csv_column(df_columns: List[str], target_options: List[str]) -> Optional[str]:
     """Finds the best matching column name case-insensitively."""
     df_cols_lower = {col.lower().strip(): col for col in df_columns}
     for option in target_options:
         option_lower = option.lower().strip()
         if option_lower in df_cols_lower:
-            return df_cols_lower[option_lower] # Return original case
+            return df_cols_lower[option_lower] # Return original case name
     return None
 
-def _load_partition_functions():
-    """ Loads partition function data from PARTITION_FUNC_FILE (e.g., CSV). """
+# --- Partition Function Handling ---
+
+def _load_partition_functions(filepath: Optional[str] = None):
+    """
+    Loads partition function data U(T) from the specified CSV file.
+
+    The CSV file should contain columns for 'Species' (e.g., "Fe I"),
+    'Temperature_K', and 'PartitionFunction_U'.
+
+    Args:
+        filepath (Optional[str]): Full path to the partition function CSV file.
+                                  If None, loading is skipped (cache remains unloaded).
+    """
     global _partition_function_cache
-    if _partition_function_cache.get("loaded") is not None: return
-    os.makedirs(ATOMIC_DATA_DIR, exist_ok=True)
-    if not os.path.exists(PARTITION_FUNC_FILE): logging.warning(f"U(T) file not found: {PARTITION_FUNC_FILE}."); _partition_function_cache={"loaded":False}; return
+    if _partition_function_cache.get("loaded") is not None: # Already attempted load
+        return
+    if filepath is None:
+        logging.warning("No partition function file path provided. U(T) data will be unavailable.")
+        _partition_function_cache = {"loaded": False}
+        return
+
+    # Ensure directory exists if path provided (though file should already exist)
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    except Exception: pass # Ignore errors here, focus on file existence
+
+    if not os.path.exists(filepath):
+        logging.error(f"Partition function file not found: {filepath}. U(T) data unavailable.")
+        _partition_function_cache = {"loaded": False}
+        return
 
     try:
-        logging.info(f"Loading U(T) from {PARTITION_FUNC_FILE}...")
-        df = pd.read_csv(PARTITION_FUNC_FILE, comment='#')
-        # Find columns flexibly
+        logging.info(f"Loading U(T) from {filepath}...")
+        df = pd.read_csv(filepath, comment='#') # Allow comments starting with #
+
+        # Find columns flexibly using case-insensitive matching
         species_col = _find_csv_column(df.columns, ['Species', 'Ion', 'Element Spec'])
         temp_col = _find_csv_column(df.columns, ['Temperature_K', 'T(K)', 'Temperature', 'Temp'])
         u_col = _find_csv_column(df.columns, ['PartitionFunction_U', 'U(T)', 'Partition Function', 'U'])
-        if not all([species_col, temp_col, u_col]): raise ValueError(f"File missing required columns (Species, Temp_K, U(T)). Found: {df.columns}")
 
-        df[temp_col]=pd.to_numeric(df[temp_col],errors='coerce'); df[u_col]=pd.to_numeric(df[u_col],errors='coerce'); df.dropna(subset=[temp_col,u_col],inplace=True); df=df[df[u_col]>0]
+        missing_required = []
+        if not species_col: missing_required.append("'Species'")
+        if not temp_col: missing_required.append("'Temperature_K'")
+        if not u_col: missing_required.append("'PartitionFunction_U'")
+        if missing_required:
+             raise ValueError(f"File missing required columns: {', '.join(missing_required)}. Found: {list(df.columns)}")
+
+        # Convert to numeric, handle errors, drop invalid rows
+        df[temp_col] = pd.to_numeric(df[temp_col], errors='coerce')
+        df[u_col] = pd.to_numeric(df[u_col], errors='coerce')
+        df.dropna(subset=[temp_col, u_col], inplace=True)
+
+        # Validate: U(T) must be positive
+        initial_rows = len(df)
+        df = df[df[u_col] > 1e-12] # Filter out non-positive partition functions
+        if len(df) < initial_rows:
+             logging.warning(f"Removed {initial_rows - len(df)} rows with non-positive U(T) values from {os.path.basename(filepath)}.")
+
+        # Group data by species and store sorted arrays in cache
         temp_cache: Dict[str, Dict[float, float]] = {}
-        for _,row in df.iterrows(): species=str(row[species_col]).strip(); temp=float(row[temp_col]); u_val=float(row[u_col]);
-        if species not in temp_cache: temp_cache[species]={}; temp_cache[species][temp]=u_val
-        _partition_function_cache.clear()
-        for species,data in temp_cache.items(): sorted_temps=sorted(data.keys());
-        if len(sorted_temps)>=2: _partition_function_cache[species]={'temps':np.array(sorted_temps),'u_values':np.array([data[t] for t in sorted_temps])}
-        elif len(sorted_temps)==1: _partition_function_cache[species]={'temps':np.array(sorted_temps),'u_values':np.array([data[sorted_temps[0]]])}
-        _partition_function_cache["loaded"]=True; logging.info(f"Loaded U(T) data for {len(_partition_function_cache)-1} species.")
-    except Exception as e: logging.error(f"Failed loading U(T): {e}",exc_info=True); _partition_function_cache={"loaded":False}
+        for _, row in df.iterrows():
+            species = str(row[species_col]).strip()
+            norm_species = _normalize_species_key(species) # Normalize key
+            if norm_species is None:
+                logging.warning(f"Skipping row with invalid species format '{species}' in {os.path.basename(filepath)}.")
+                continue
 
-def get_partition_function(species: str, temperature_k: float) -> Optional[float]:
-    """ Retrieves or interpolates the partition function U(T). """
+            temp = float(row[temp_col])
+            u_val = float(row[u_col])
+            if norm_species not in temp_cache:
+                temp_cache[norm_species] = {}
+            temp_cache[norm_species][temp] = u_val
+
+        # Clear previous cache (except 'loaded' flag) before repopulating
+        loaded_status = _partition_function_cache.get("loaded")
+        _partition_function_cache.clear()
+        if loaded_status is not None: _partition_function_cache["loaded"] = loaded_status
+
+        species_loaded_count = 0
+        for species, data in temp_cache.items():
+            sorted_temps = sorted(data.keys())
+            if len(sorted_temps) >= 2: # Need at least 2 points for interpolation
+                _partition_function_cache[species] = {
+                    'temps': np.array(sorted_temps, dtype=float),
+                    'u_values': np.array([data[t] for t in sorted_temps], dtype=float)
+                }
+                species_loaded_count += 1
+            elif len(sorted_temps) == 1:
+                # Store single point, but interpolation won't work
+                _partition_function_cache[species] = {
+                     'temps': np.array(sorted_temps, dtype=float),
+                     'u_values': np.array([data[sorted_temps[0]]], dtype=float)
+                }
+                species_loaded_count += 1 # Count species even if only 1 point
+                logging.warning(f"Only 1 data point found for U(T) for species '{species}'. Interpolation will not be possible.")
+            # else: species had no valid data points
+
+        _partition_function_cache["loaded"] = True
+        logging.info(f"Loaded U(T) data for {species_loaded_count} species from {os.path.basename(filepath)}.")
+
+    except FileNotFoundError: # Should be caught above, but safety
+        logging.error(f"Partition function file not found during load attempt: {filepath}")
+        _partition_function_cache = {"loaded": False}
+    except ValueError as ve: # Catch specific errors like missing columns
+         logging.error(f"Error loading partition functions from {filepath}: {ve}")
+         _partition_function_cache = {"loaded": False}
+    except pd.errors.ParserError as pe:
+         logging.error(f"Error parsing partition function file {filepath} (check format/delimiter): {pe}")
+         _partition_function_cache = {"loaded": False}
+    except Exception as e:
+        logging.error(f"Unexpected error loading partition functions from {filepath}: {e}", exc_info=True)
+        _partition_function_cache = {"loaded": False}
+
+
+def get_partition_function(species: str, temperature_k: float, filepath: Optional[str] = None) -> Optional[float]:
+    """
+    Retrieves or interpolates the partition function U(T) for a species at a given temperature.
+
+    Args:
+        species (str): The species identifier (e.g., "Fe I"). Case-insensitive matching attempted.
+        temperature_k (float): The desired temperature in Kelvin.
+        filepath (Optional[str]): Path to the partition function CSV file. If None and data
+                                  is not cached, loading will fail. Should be provided on first call.
+
+    Returns:
+        Optional[float]: The partition function U(T), or None if data is unavailable,
+                         temperature is outside the range, or interpolation fails.
+                         **Does not extrapolate.**
+    """
     global _partition_function_cache
-    if _partition_function_cache.get("loaded") is None: _load_partition_functions()
-    if not _partition_function_cache.get("loaded", False): return None
-    species_data = _partition_function_cache.get(species)
-    if not species_data: logging.warning(f"U(T) data not found for {species}."); return None
-    temps=species_data['temps']; u_values=species_data['u_values']
-    if len(temps)<2:
-        if len(temps)==1 and np.isclose(temperature_k,temps[0]): return u_values[0]
-        logging.warning(f"Need >=2 pts for U(T) interp for {species}. Have {len(temps)}."); return None
-    try: # Use linear interpolation
+    if _partition_function_cache.get("loaded") is None:
+        _load_partition_functions(filepath) # Attempt load if not done yet
+
+    if not _partition_function_cache.get("loaded", False):
+        logging.debug(f"Partition function cache not loaded or failed to load. Cannot get U(T) for {species}.")
+        return None
+
+    norm_species = _normalize_species_key(species)
+    if norm_species is None:
+        logging.warning(f"Invalid species format '{species}' requested for U(T).")
+        return None
+
+    species_data = _partition_function_cache.get(norm_species)
+    if not species_data:
+        logging.warning(f"U(T) data not found in cache for '{norm_species}'.")
+        return None
+
+    temps = species_data.get('temps')
+    u_values = species_data.get('u_values')
+
+    if temps is None or u_values is None or len(temps) < 2:
+        # Need >= 2 points for interpolation
+        if len(temps) == 1 and np.isclose(temperature_k, temps[0]):
+            logging.debug(f"Returning single stored U(T) point for {norm_species} at {temperature_k:.0f}K.")
+            return float(u_values[0])
+        else:
+            logging.warning(f"Cannot interpolate U(T) for '{norm_species}': Need >= 2 data points, found {len(temps)}.")
+            return None
+
+    # --- Check if temperature is within the loaded range ---
+    min_temp, max_temp = temps[0], temps[-1]
+    if not (min_temp <= temperature_k <= max_temp):
+        logging.error(f"Requested temperature T={temperature_k:.0f}K is outside the loaded range "
+                      f"[{min_temp:.0f}-{max_temp:.0f}]K for species '{norm_species}'. Extrapolation not supported.")
+        return None # Return None if outside range
+
+    # --- Perform Linear Interpolation ---
+    try:
         interpolated_u = np.interp(temperature_k, temps, u_values)
-        if temperature_k<temps[0] or temperature_k>temps[-1]: logging.warning(f"T={temperature_k:.0f}K outside U(T) range [{temps[0]:.0f}-{temps[-1]:.0f}]K for {species}. Extrapolated.")
-        logging.debug(f"U(T={temperature_k:.0f}K) for {species}: {interpolated_u:.3f}"); return interpolated_u
-    except Exception as e: logging.error(f"U(T) interp error for {species} @ {temperature_k}K: {e}"); return None
+        if not np.isfinite(interpolated_u) or interpolated_u <= 0:
+             logging.error(f"Interpolated U(T) for {norm_species} @ {temperature_k:.0f}K is invalid ({interpolated_u:.3e}).")
+             return None
+        logging.debug(f"Interpolated U(T={temperature_k:.0f}K) for {norm_species}: {interpolated_u:.3f}")
+        return float(interpolated_u)
+    except Exception as e:
+        logging.error(f"Error during U(T) interpolation for {norm_species} @ {temperature_k}K: {e}", exc_info=True)
+        return None
 
 # --- Ionization Energy Handling ---
-def _load_ionization_energies():
-    """ Loads ionization energy data from IONIZATION_ENERGY_FILE. """
+
+def _load_ionization_energies(filepath: Optional[str] = None):
+    """
+    Loads ionization energy data (V_ion) from the specified CSV file.
+    If the file is missing or fails to load, falls back to hardcoded defaults.
+
+    The CSV file should contain columns for 'Species' (e.g., "Fe I" - the lower state)
+    and 'IonizationEnergy_eV'.
+
+    Args:
+        filepath (Optional[str]): Full path to the ionization energy CSV file.
+                                  If None, uses defaults.
+    """
     global _ionization_energy_cache
-    if _ionization_energy_cache.get("loaded") is not None: return
-    os.makedirs(ATOMIC_DATA_DIR, exist_ok=True)
-    if not os.path.exists(IONIZATION_ENERGY_FILE): logging.warning(f"V_ion file not found: {IONIZATION_ENERGY_FILE}. Using defaults."); _ionization_energy_cache=DEFAULT_IONIZATION_ENERGIES.copy(); _ionization_energy_cache["loaded"]=True; return
-    try:
-        logging.info(f"Loading V_ion from {IONIZATION_ENERGY_FILE}...")
-        df = pd.read_csv(IONIZATION_ENERGY_FILE, comment='#'); df.columns=df.columns.str.strip()
-        species_col = _find_csv_column(df.columns, ['Species', 'Ion', 'Element Spec Lower'])
-        energy_col = _find_csv_column(df.columns, ['IonizationEnergy_eV', 'V_ion (eV)', 'Ionization Energy (eV)'])
-        if not species_col or not energy_col: raise ValueError(f"File missing required columns (Species, IonizationEnergy_eV). Found: {df.columns}")
+    if _ionization_energy_cache.get("loaded") is not None: # Already attempted load
+        return
 
-        df[energy_col]=pd.to_numeric(df[energy_col],errors='coerce'); df.dropna(subset=[energy_col],inplace=True); loaded_energies={}; loaded_count=0
-        for _,row in df.iterrows(): species=str(row[species_col]).strip(); energy=float(row[energy_col]);
-        if np.isfinite(energy) and energy>0: loaded_energies[species]=energy; loaded_count+=1
-        # Start with defaults, update with file data
-        _ionization_energy_cache=DEFAULT_IONIZATION_ENERGIES.copy(); _ionization_energy_cache.update(loaded_energies); _ionization_energy_cache["loaded"]=True; logging.info(f"Loaded/updated V_ion for {loaded_count} species from file.")
-    except Exception as e: logging.error(f"Failed loading V_ion: {e}",exc_info=True);
-    # Ensure cache is marked loaded even if file loading fails (use defaults)
-    if not _ionization_energy_cache or _ionization_energy_cache.get("loaded") is None: _ionization_energy_cache=DEFAULT_IONIZATION_ENERGIES.copy(); _ionization_energy_cache["loaded"]=True
+    file_was_loaded = False
+    loaded_energies: Dict[str, float] = {}
+    loaded_count = 0
+
+    if filepath is None:
+        logging.warning("No ionization energy file path provided. Using limited built-in defaults.")
+    else:
+        # Ensure directory exists if path provided
+        try:
+             os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        except Exception: pass
+
+        if not os.path.exists(filepath):
+            logging.warning(f"Ionization energy file not found: {filepath}. Using limited built-in defaults.")
+        else:
+            try:
+                logging.info(f"Loading V_ion from {filepath}...")
+                df = pd.read_csv(filepath, comment='#')
+
+                # Find columns flexibly
+                species_col = _find_csv_column(df.columns, ['Species', 'Ion', 'Element Spec Lower', 'Lower Species'])
+                energy_col = _find_csv_column(df.columns, ['IonizationEnergy_eV', 'V_ion (eV)', 'Ionization Energy (eV)'])
+
+                missing_required = []
+                if not species_col: missing_required.append("'Species'")
+                if not energy_col: missing_required.append("'IonizationEnergy_eV'")
+                if missing_required:
+                    raise ValueError(f"File missing required columns: {', '.join(missing_required)}. Found: {list(df.columns)}")
+
+                df[energy_col] = pd.to_numeric(df[energy_col], errors='coerce')
+                df.dropna(subset=[energy_col], inplace=True)
+
+                for _, row in df.iterrows():
+                    species = str(row[species_col]).strip()
+                    norm_species = _normalize_species_key(species) # Normalize key
+                    if norm_species is None:
+                        logging.warning(f"Skipping row with invalid species format '{species}' in {os.path.basename(filepath)}.")
+                        continue
+
+                    energy = float(row[energy_col])
+                    if np.isfinite(energy) and energy > 0: # Basic validation
+                        loaded_energies[norm_species] = energy
+                        loaded_count += 1
+                    else:
+                        logging.warning(f"Skipping invalid ionization energy value '{energy}' for species '{species}' in {os.path.basename(filepath)}.")
+
+                file_was_loaded = True # Mark that we attempted to load from file
+                logging.info(f"Loaded {loaded_count} valid V_ion entries from {os.path.basename(filepath)}.")
+
+            except FileNotFoundError: # Should be caught above, but safety
+                 logging.warning(f"Ionization energy file not found during load attempt: {filepath}. Using limited built-in defaults.")
+            except ValueError as ve: # Catch specific errors like missing columns
+                 logging.error(f"Error loading ionization energies from {filepath}: {ve}. Using limited built-in defaults.")
+            except pd.errors.ParserError as pe:
+                 logging.error(f"Error parsing ionization energy file {filepath} (check format/delimiter): {pe}. Using limited built-in defaults.")
+            except Exception as e:
+                logging.error(f"Unexpected error loading ionization energies from {filepath}: {e}. Using limited built-in defaults.", exc_info=True)
+
+    # --- Initialize Cache ---
+    # Start with defaults, then update/overwrite with values loaded from file
+    _ionization_energy_cache = DEFAULT_IONIZATION_ENERGIES.copy()
+    if file_was_loaded and loaded_energies:
+         _ionization_energy_cache.update(loaded_energies)
+         logging.debug(f"Updated cache with {len(loaded_energies)} V_ion values from file.")
+    elif not file_was_loaded:
+         logging.debug("Initialized V_ion cache using only built-in defaults.")
+    else: # File was loaded but resulted in no valid data
+         logging.warning("File loaded for V_ion but contained no valid entries. Using only built-in defaults.")
+
+    # --- Validate Final Cache Values ---
+    invalid_defaults_count = 0
+    for key, value in _ionization_energy_cache.items():
+        if not isinstance(value, (float, int)) or not np.isfinite(value) or value <= 0:
+             logging.warning(f"Cached ionization energy for '{key}' is invalid ({value}). It will be ignored.")
+             # Optionally remove invalid entry? Or just let get_ionization_energy handle it.
+             invalid_defaults_count += 1
+    if invalid_defaults_count > 0:
+         logging.warning(f"Found {invalid_defaults_count} invalid entries during V_ion cache validation.")
+
+    _ionization_energy_cache["loaded"] = True # Mark cache as loaded (even if only defaults)
 
 
-def get_ionization_energy(species_lower: str) -> Optional[float]:
-    """ Retrieves the ionization energy (eV) for the specified lower ionization stage. """
-    if _ionization_energy_cache.get("loaded") is None: _load_ionization_energies()
-    # Perform case-insensitive lookup if direct match fails? Maybe not needed if file/defaults are consistent.
-    energy = _ionization_energy_cache.get(species_lower)
-    if energy is None: logging.warning(f"V_ion not found for: {species_lower}"); return None
-    elif not np.isfinite(energy) or energy<=0: logging.warning(f"Invalid V_ion ({energy}) for {species_lower}"); return None
-    logging.debug(f"V_ion for {species_lower}: {energy:.3f} eV"); return energy
+def get_ionization_energy(species_lower: str, filepath: Optional[str] = None) -> Optional[float]:
+    """
+    Retrieves the ionization energy (V_ion in eV) for the specified lower ionization stage.
+
+    Args:
+        species_lower (str): The species identifier for the *lower* ionization state
+                             (e.g., "Fe I"). Case-insensitive matching attempted.
+        filepath (Optional[str]): Path to the ionization energy CSV file. If None and data
+                                  is not cached, loading will be attempted using defaults.
+                                  Should be provided on first call.
+
+    Returns:
+        Optional[float]: Ionization energy in eV, or None if not found or invalid.
+    """
+    if _ionization_energy_cache.get("loaded") is None:
+        _load_ionization_energies(filepath) # Attempt load if not done yet
+
+    norm_species = _normalize_species_key(species_lower)
+    if norm_species is None:
+        logging.warning(f"Invalid species format '{species_lower}' requested for V_ion.")
+        return None
+
+    energy = _ionization_energy_cache.get(norm_species)
+
+    if energy is None:
+        # Changed from warning to error as this indicates missing essential data
+        logging.error(f"Ionization energy (V_ion) not found for '{norm_species}'. "
+                      "Check input file or defaults.")
+        return None
+    elif not isinstance(energy, (float, int)) or not np.isfinite(energy) or energy <= 0:
+        logging.warning(f"Invalid V_ion ({energy}) found in cache for '{norm_species}'.")
+        return None
+
+    logging.debug(f"Retrieved V_ion for {norm_species}: {energy:.5f} eV")
+    return float(energy)
